@@ -1,0 +1,24 @@
+paths:
+  raw_data_root: "D:/Options Data"
+  artifact_root: "./artifacts"
+
+study:
+  underlying_symbol: "^SPX"
+  start_date: "2004-01-02"
+  end_date: "2008-03-31"
+  forecast_horizon_days: 1
+
+split:
+  validation_size: 84
+  test_size: 84
+  min_train_size: 252
+  refit_frequency: 21
+
+runtime:
+  seed: 20260329
+  overwrite: false
+
+models:
+  reconstructor_config: "configs/models/reconstructor_smoke.yaml"
+  xgboost_config: "configs/models/xgboost_smoke.yaml"
+  lstm_config: "configs/models/lstm_smoke.yaml"

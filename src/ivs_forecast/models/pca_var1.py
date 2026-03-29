@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import polars as pl
+
+from ivs_forecast.models.base import (
+    ModelArtifact,
+    SampledSurfaceModel,
+    current_surface_matrix,
+    target_matrix,
+)
+
+
+@dataclass
+class PcaVar1State:
+    mean: np.ndarray
+    components: np.ndarray
+    beta: np.ndarray
+
+
+class PcaVar1Model(SampledSurfaceModel):
+    model_name = "pca_var1"
+
+    def __init__(self) -> None:
+        self.state: PcaVar1State | None = None
+
+    def fit(self, train_frame: pl.DataFrame) -> None:
+        x_train = current_surface_matrix(train_frame)
+        y_train = target_matrix(train_frame)
+        if x_train.shape[0] < 3:
+            raise ValueError("pca_var1 requires at least 3 training rows.")
+        mean = x_train.mean(axis=0)
+        centered = x_train - mean
+        _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        components = vt[:3]
+        x_scores = centered @ components.T
+        y_scores = (y_train - mean) @ components.T
+        design = np.column_stack([np.ones(x_scores.shape[0]), x_scores])
+        beta, *_ = np.linalg.lstsq(design, y_scores, rcond=None)
+        self.state = PcaVar1State(mean=mean, components=components, beta=beta)
+
+    def predict(self, feature_frame: pl.DataFrame) -> np.ndarray:
+        if self.state is None:
+            raise RuntimeError("pca_var1 must be fit before prediction.")
+        x_curr = current_surface_matrix(feature_frame)
+        x_scores = (x_curr - self.state.mean) @ self.state.components.T
+        design = np.column_stack([np.ones(x_scores.shape[0]), x_scores])
+        y_scores_hat = design @ self.state.beta
+        return self.state.mean + y_scores_hat @ self.state.components
+
+    def artifact(self) -> ModelArtifact:
+        if self.state is None:
+            return super().artifact()
+        return ModelArtifact(
+            model_name=self.model_name,
+            params={
+                "factor_count": 3,
+            },
+        )

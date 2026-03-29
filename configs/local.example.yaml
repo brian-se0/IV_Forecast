@@ -1,0 +1,13 @@
+paths:
+  raw_data_root: "D:/Options Data"
+  artifact_root: "./artifacts"
+
+study:
+  underlying_symbol: "^SPX"
+  start_date: "2004-01-02"
+  end_date: "2021-04-09"
+  forecast_horizon_days: 1
+
+runtime:
+  seed: 20260329
+  overwrite: false

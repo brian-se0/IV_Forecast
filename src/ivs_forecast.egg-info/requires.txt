@@ -1,0 +1,14 @@
+numpy
+polars
+pyarrow
+pydantic
+pyyaml
+rich
+scipy
+torch
+typer
+xgboost
+
+[dev]
+pytest
+ruff
