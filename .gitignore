@@ -1,7 +1,9 @@
 .venv/
+.venv_posix/
 .pytest_cache/
 .ruff_cache/
 artifacts/
 
 __pycache__/
 *.py[cod]
+._*

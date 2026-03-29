@@ -13,9 +13,13 @@ Primary run-level artifacts:
 - `raw_inventory.parquet`
 - `raw_inventory.json`
 - `vendor_schema_reconciliation.json`
-- `clean_contracts.parquet`
+- `data_audit_report.md`
+- `clean_contracts/` partitioned parquet dataset
+- `clean_contracts_index.parquet`
 - `forward_terms.parquet`
-- `surface_nodes.parquet`
+- `surface_nodes/` partitioned parquet dataset
+- `surface_nodes_index.parquet`
+- `surface_date_quality.parquet`
 - `grid_definition.parquet`
 - `sampled_surface_wide.parquet`
 - `features_targets.parquet`
@@ -31,5 +35,8 @@ Primary run-level artifacts:
 - `dm_tests.json`
 - `mcs_results.json`
 - `summary.md`
+
+Each stage also writes `manifests/<stage_name>_manifest.json` plus
+`manifests/<stage_name>_resolved_config.yaml`.
 
 Run directories are immutable unless overwrite is explicitly requested.

@@ -24,8 +24,44 @@ class SplitManifest:
         }
 
 
+def _validated_target_dates(features_targets: pl.DataFrame) -> list[date]:
+    if features_targets["quote_date"].null_count() > 0 or features_targets["target_date"].null_count() > 0:
+        raise ValueError("Feature rows must not contain null quote_date or target_date values.")
+    quote_dates = features_targets["quote_date"].to_list()
+    if quote_dates != sorted(quote_dates):
+        raise ValueError("Feature rows must remain ordered by quote_date.")
+    target_dates = features_targets["target_date"].to_list()
+    if target_dates != sorted(target_dates):
+        raise ValueError("Feature rows must remain ordered by target_date.")
+    unique_target_dates = sorted(features_targets["target_date"].unique().to_list())
+    if len(unique_target_dates) != len(target_dates):
+        raise ValueError("Feature rows must not contain duplicate target_date values.")
+    for quote_date, target_date in zip(quote_dates, target_dates, strict=True):
+        if not quote_date < target_date:
+            raise ValueError("Each feature row must forecast a strictly later target_date.")
+    return unique_target_dates
+
+
+def assert_refit_window_precedes_chunk(
+    available_rows: pl.DataFrame,
+    chunk_rows: pl.DataFrame,
+    stage_name: str,
+) -> None:
+    if chunk_rows.is_empty():
+        raise ValueError(f"{stage_name} received an empty forecast chunk.")
+    chunk_start = chunk_rows["target_date"][0]
+    if available_rows.is_empty():
+        raise ValueError(f"{stage_name} received no rows strictly prior to chunk {chunk_start}.")
+    available_max = available_rows["target_date"].max()
+    if available_max is None or not available_max < chunk_start:
+        raise ValueError(
+            f"{stage_name} chronology violation: training/refit rows end at {available_max}, "
+            f"which is not strictly earlier than chunk start {chunk_start}."
+        )
+
+
 def build_split_manifest(features_targets: pl.DataFrame, config: AppConfig) -> SplitManifest:
-    target_dates = sorted(features_targets["target_date"].unique().to_list())
+    target_dates = _validated_target_dates(features_targets)
     required = config.split.validation_size + config.split.test_size + config.split.min_train_size
     if len(target_dates) < required:
         raise ValueError(

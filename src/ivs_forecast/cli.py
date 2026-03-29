@@ -28,6 +28,7 @@ def verify_data(
     outputs = verify_data_stage(resolved)
     console.print(f"Wrote inventory to {outputs['inventory_path']}")
     console.print(f"Wrote reconciliation to {outputs['schema_report_path']}")
+    console.print(f"Wrote audit report to {outputs['audit_report_path']}")
 
 
 @app.command("build-data")

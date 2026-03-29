@@ -45,6 +45,7 @@ pythonpath = ["src", "."]
 target-version = "py314"
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = [".venv_posix", "**/._*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "W"]

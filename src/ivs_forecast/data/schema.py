@@ -22,6 +22,13 @@ CANONICAL_REQUIRED_COLUMNS: tuple[str, ...] = (
     "open_interest",
 )
 
+CALCS_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "active_underlying_price_1545",
+    "implied_volatility_1545",
+    "delta_1545",
+    "vega_1545",
+)
+
 OPTIONAL_COLUMNS: tuple[str, ...] = (
     "gamma_1545",
     "theta_1545",

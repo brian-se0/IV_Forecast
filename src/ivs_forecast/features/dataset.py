@@ -14,8 +14,27 @@ def grid_ids() -> list[str]:
     return [f"g{index:03d}" for index in range(GRID_SIZE)]
 
 
+def _validated_sampled_surfaces(sampled_surfaces: pl.DataFrame) -> pl.DataFrame:
+    if sampled_surfaces.is_empty():
+        raise ValueError("Sampled surfaces are empty.")
+    if sampled_surfaces["quote_date"].null_count() > 0:
+        raise ValueError("Sampled surfaces must not contain null quote_date values.")
+    quote_dates = sampled_surfaces["quote_date"].to_list()
+    if len(set(quote_dates)) != len(quote_dates):
+        raise ValueError("Sampled surfaces must not contain duplicate quote_date rows.")
+    if quote_dates != sorted(quote_dates):
+        raise ValueError("Sampled surfaces must be strictly ordered by quote_date.")
+    return sampled_surfaces
+
+
+def assert_feature_target_separation() -> None:
+    overlap = sorted(set(x_feature_columns()) & set(y_target_columns()))
+    if overlap:
+        raise ValueError(f"Feature/target leakage detected in shared column names: {overlap}")
+
+
 def build_features_targets(sampled_surfaces: pl.DataFrame) -> pl.DataFrame:
-    ordered = sampled_surfaces.sort("quote_date")
+    ordered = _validated_sampled_surfaces(sampled_surfaces)
     ids = grid_ids()
     logiv_columns = [f"logiv_{grid_id}" for grid_id in ids]
     logiv_matrix = ordered.select(logiv_columns).to_numpy()
@@ -49,7 +68,12 @@ def build_features_targets(sampled_surfaces: pl.DataFrame) -> pl.DataFrame:
         rows.append(row)
     if not rows:
         raise ValueError("Too few valid sampled-surface dates to build features/targets.")
-    return pl.DataFrame(rows).sort("quote_date")
+    assert_feature_target_separation()
+    features = pl.DataFrame(rows)
+    expected_next_dates = ordered["quote_date"][23:].to_list()
+    if features["target_date"].to_list() != expected_next_dates:
+        raise ValueError("Each target_date must equal the next available modeling date.")
+    return features
 
 
 def x_feature_columns() -> list[str]:

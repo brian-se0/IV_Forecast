@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from ivs_forecast.data.partitioned import DatePartitionIndex
 from ivs_forecast.evaluation.hedged_pnl import hedged_pnl_utility
 from ivs_forecast.evaluation.metrics import compute_metrics
 from ivs_forecast.evaluation.pricing_mark import black_scholes_price, pricing_utility
@@ -25,6 +26,26 @@ def contracts_with_forward(
         )
         .alias("m")
     )
+
+
+def load_contracts_with_forward_for_date(
+    clean_contracts_store: DatePartitionIndex,
+    forward_terms: pl.DataFrame,
+    quote_date: object,
+) -> pl.DataFrame:
+    clean_contracts = clean_contracts_store.load_date(quote_date)
+    forward_for_date = forward_terms.filter(pl.col("quote_date") == quote_date)
+    if forward_for_date.is_empty():
+        raise ValueError(
+            f"Forward terms are missing for quote_date {quote_date}; the date-partitioned contract "
+            "evaluation path cannot proceed."
+        )
+    contracts = contracts_with_forward(clean_contracts, forward_for_date)
+    if contracts.is_empty():
+        raise ValueError(
+            f"No forward-enriched contracts were available for quote_date {quote_date}."
+        )
+    return contracts
 
 
 def evaluate_node_forecast(

@@ -15,19 +15,21 @@ from ivs_forecast.artifacts.manifests import (
     write_yaml,
 )
 from ivs_forecast.config import AppConfig
+from ivs_forecast.data.partitioned import DatePartitionIndex
 from ivs_forecast.evaluation.dm import pairwise_dm
 from ivs_forecast.evaluation.mcs import run_mcs
 from ivs_forecast.models.reconstructor import FittedReconstructor, train_reconstructor
 from ivs_forecast.pipeline.build_data import build_data_stage
 from ivs_forecast.pipeline.forecast import (
-    contracts_with_forward,
     evaluate_hedged_pnl_utility,
     evaluate_node_forecast,
     evaluate_pricing_utility,
     evaluate_straddle_signal,
+    load_contracts_with_forward_for_date,
     summarize_straddle,
 )
 from ivs_forecast.pipeline.splits import (
+    assert_refit_window_precedes_chunk,
     build_split_manifest,
     label_feature_rows,
     write_split_manifest,
@@ -177,12 +179,12 @@ def write_summary_report(run_dir: Path) -> Path:
 def run_experiment(config: AppConfig) -> Path:
     outputs = build_data_stage(config)
     run_root = outputs["run_root"]
-    clean_contracts = pl.read_parquet(outputs["clean_contracts_path"])
     forward_terms = pl.read_parquet(outputs["forward_terms_path"])
-    surface_nodes = pl.read_parquet(outputs["surface_nodes_path"])
     grid_definition = pl.read_parquet(outputs["grid_definition_path"])
     sampled_surface_wide = pl.read_parquet(outputs["sampled_surface_path"])
     features_targets = pl.read_parquet(outputs["features_targets_path"])
+    clean_contracts_store = DatePartitionIndex(outputs["clean_contracts_index_path"], "clean_contracts")
+    surface_nodes_store = DatePartitionIndex(outputs["surface_nodes_index_path"], "surface_nodes")
     split_manifest = build_split_manifest(features_targets, config)
     labeled_features = label_feature_rows(features_targets, split_manifest)
     write_split_manifest(run_root / "split_manifest.json", split_manifest)
@@ -194,14 +196,11 @@ def run_experiment(config: AppConfig) -> Path:
             labeled_features=labeled_features,
             validation_target_dates=split_manifest.validation_target_dates,
             sampled_surface_wide=sampled_surface_wide,
-            surface_nodes=surface_nodes,
+            surface_nodes_store=surface_nodes_store,
             config=config,
         )
         selected_models[model_name] = selected.params
     write_json(run_root / "selected_model_configs.json", selected_models)
-    contracts_panel = contracts_with_forward(clean_contracts, forward_terms)
-    contracts_by_date = _partition_by_single_date(contracts_panel, "quote_date")
-    surface_nodes_by_date = _partition_by_single_date(surface_nodes, "quote_date")
     sampled_surface_by_date = _partition_by_single_date(sampled_surface_wide, "quote_date")
     atm_grid_map = _atm_grid_map(grid_definition)
     loss_rows: list[dict[str, Any]] = []
@@ -215,6 +214,33 @@ def run_experiment(config: AppConfig) -> Path:
     node_forecasts_by_model: dict[str, list[pl.DataFrame]] = {name: [] for name in MODEL_FAMILIES}
     latest_reconstructor: FittedReconstructor | None = None
     latest_reconstructor_dates: list[str] = []
+    target_node_cache: dict[object, pl.DataFrame] = {}
+    contract_cache: dict[object, pl.DataFrame] = {}
+
+    def _surface_nodes_for_date(quote_date: object) -> pl.DataFrame:
+        nodes = target_node_cache.get(quote_date)
+        if nodes is None:
+            nodes = surface_nodes_store.load_date(quote_date)
+            target_node_cache[quote_date] = nodes
+            if len(target_node_cache) > 4:
+                oldest = next(iter(target_node_cache))
+                del target_node_cache[oldest]
+        return nodes
+
+    def _contracts_for_date(quote_date: object) -> pl.DataFrame:
+        contracts = contract_cache.get(quote_date)
+        if contracts is None:
+            contracts = load_contracts_with_forward_for_date(
+                clean_contracts_store=clean_contracts_store,
+                forward_terms=forward_terms,
+                quote_date=quote_date,
+            )
+            contract_cache[quote_date] = contracts
+            if len(contract_cache) > 4:
+                oldest = next(iter(contract_cache))
+                del contract_cache[oldest]
+        return contracts
+
     for offset in range(0, len(split_manifest.test_target_dates), config.split.refit_frequency):
         chunk_dates = split_manifest.test_target_dates[
             offset : offset + config.split.refit_frequency
@@ -222,20 +248,32 @@ def run_experiment(config: AppConfig) -> Path:
         chunk_start = chunk_dates[0]
         available_rows = labeled_features.filter(pl.col("target_date") < chunk_start).filter(
             pl.col("split_label") != "discard"
-        )
+        ).sort("target_date")
         available_dates = sampled_surface_wide.filter(pl.col("quote_date") < chunk_start)[
             "quote_date"
         ].to_list()
+        chunk_rows = labeled_features.filter(pl.col("target_date").is_in(chunk_dates)).sort(
+            "target_date"
+        )
+        assert_refit_window_precedes_chunk(available_rows, chunk_rows, "test_refit")
+        if not available_dates:
+            raise ValueError(
+                f"Reconstructor chronology violation: no sampled surfaces are available prior to {chunk_start}."
+            )
+        if max(available_dates) >= chunk_start:
+            raise ValueError(
+                "Reconstructor chronology violation: sampled surfaces for test refitting are not "
+                f"strictly earlier than chunk start {chunk_start}."
+            )
         reconstructor = train_reconstructor(
             sampled_surface_wide=sampled_surface_wide,
-            surface_nodes=surface_nodes,
+            surface_nodes=surface_nodes_store.load_many(available_dates),
             available_dates=available_dates,
             config_path=Path(config.models.reconstructor_config),
             seed=config.runtime.seed,
         )
         latest_reconstructor = reconstructor
         latest_reconstructor_dates = [str(value) for value in available_dates]
-        chunk_rows = labeled_features.filter(pl.col("target_date").is_in(chunk_dates))
         for model_name in MODEL_FAMILIES:
             model = instantiate_model(model_name, selected_models[model_name], config.runtime.seed)
             model.fit(available_rows)
@@ -257,7 +295,7 @@ def run_experiment(config: AppConfig) -> Path:
                     target_date=row["target_date"],
                     predicted_sampled_iv=pred_iv,
                     reconstructor=reconstructor,
-                    target_nodes=surface_nodes_by_date[row["target_date"]],
+                    target_nodes=_surface_nodes_for_date(row["target_date"]),
                 )
                 loss_rows.append(node_loss_row)
                 arbitrage_rows.append(arbitrage_row)
@@ -268,7 +306,7 @@ def run_experiment(config: AppConfig) -> Path:
                     target_date=row["target_date"],
                     predicted_sampled_iv=pred_iv,
                     reconstructor=reconstructor,
-                    target_contracts=contracts_by_date[row["target_date"]],
+                    target_contracts=_contracts_for_date(row["target_date"]),
                 )
                 pricing_rows.append(pricing_row)
                 hedged_rows.extend(
@@ -276,7 +314,7 @@ def run_experiment(config: AppConfig) -> Path:
                         model_name=model_name,
                         quote_date=row["quote_date"],
                         target_date=row["target_date"],
-                        current_contracts=contracts_by_date[row["quote_date"]],
+                        current_contracts=_contracts_for_date(row["quote_date"]),
                         target_priced_contracts=priced_contracts,
                     )
                 )
@@ -285,8 +323,8 @@ def run_experiment(config: AppConfig) -> Path:
                         model_name=model_name,
                         quote_date=row["quote_date"],
                         target_date=row["target_date"],
-                        current_contracts=contracts_by_date[row["quote_date"]],
-                        target_contracts=contracts_by_date[row["target_date"]],
+                        current_contracts=_contracts_for_date(row["quote_date"]),
+                        target_contracts=_contracts_for_date(row["target_date"]),
                         predicted_sampled_iv=pred_iv,
                         current_sampled_surface=sampled_surface_by_date[row["quote_date"]],
                         reconstructor=reconstructor,
@@ -337,24 +375,35 @@ def run_experiment(config: AppConfig) -> Path:
     write_polars(run_root / "hedged_pnl_utility.parquet", hedged_pnl_utility)
     write_polars(run_root / "straddle_signal_utility.parquet", straddle_signal_utility)
     dm_results = {
-        "rmse_iv_sq": [
-            item.__dict__
-            for item in pairwise_dm(
-                _loss_series(
-                    loss_panel.with_columns((pl.col("rmse_iv") ** 2).alias("rmse_iv_sq")),
-                    "rmse_iv_sq",
+        "method": {
+            "alternative": "two_sided",
+            "variance_estimator": "newey_west_hac",
+            "bandwidth": 5,
+            "finite_sample_adjustment": "harvey_leybourne_newbold",
+            "reference_distribution": "student_t",
+        },
+        "metrics": {
+            "rmse_iv_sq": [
+                item.__dict__
+                for item in pairwise_dm(
+                    _loss_series(
+                        loss_panel.with_columns((pl.col("rmse_iv") ** 2).alias("rmse_iv_sq")),
+                        "rmse_iv_sq",
+                    )
                 )
-            )
-        ],
-        "vega_rmse_iv_sq": [
-            item.__dict__
-            for item in pairwise_dm(
-                _loss_series(
-                    loss_panel.with_columns((pl.col("vega_rmse_iv") ** 2).alias("vega_rmse_iv_sq")),
-                    "vega_rmse_iv_sq",
+            ],
+            "vega_rmse_iv_sq": [
+                item.__dict__
+                for item in pairwise_dm(
+                    _loss_series(
+                        loss_panel.with_columns(
+                            (pl.col("vega_rmse_iv") ** 2).alias("vega_rmse_iv_sq")
+                        ),
+                        "vega_rmse_iv_sq",
+                    )
                 )
-            )
-        ],
+            ],
+        },
     }
     write_json(run_root / "dm_tests.json", dm_results)
     mcs_results = {
@@ -401,11 +450,34 @@ def run_experiment(config: AppConfig) -> Path:
         straddle_rows=straddle_signal_utility,
         selected_models=selected_models,
     )
-    (run_root / "summary.md").write_text(summary, encoding="utf-8")
+    summary_path = run_root / "summary.md"
+    summary_path.write_text(summary, encoding="utf-8")
     write_stage_bundle(
         run_root / "manifests",
         "run",
         config.model_config_dump(),
+        global_seed=config.runtime.seed,
+        device_by_model_family={
+            "rw_last": "cpu",
+            "pca_var1": "cpu",
+            "reconstructor": "cuda",
+            "xgb_direct": "cuda",
+            "lstm_direct": "cuda",
+        },
+        primary_artifact_paths=[
+            run_root / "split_manifest.json",
+            run_root / "selected_model_configs.json",
+            run_root / "loss_panel.parquet",
+            run_root / "arbitrage_panel.parquet",
+            run_root / "pricing_utility.parquet",
+            run_root / "hedged_pnl_utility.parquet",
+            run_root / "straddle_signal_utility.parquet",
+            run_root / "dm_tests.json",
+            run_root / "mcs_results.json",
+            run_root / "reconstructor_model.pt",
+            run_root / "reconstructor_manifest.json",
+            summary_path,
+        ],
         counts={
             "loss_rows": loss_panel.height,
             "pricing_rows": pricing_utility.height,
@@ -414,9 +486,9 @@ def run_experiment(config: AppConfig) -> Path:
         },
         diagnostics={"selected_models": selected_models},
         upstream_paths=[
-            outputs["clean_contracts_path"],
+            outputs["clean_contracts_index_path"],
             outputs["forward_terms_path"],
-            outputs["surface_nodes_path"],
+            outputs["surface_nodes_index_path"],
             outputs["sampled_surface_path"],
             outputs["features_targets_path"],
         ],

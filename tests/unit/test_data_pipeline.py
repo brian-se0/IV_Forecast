@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import date
 from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
+from tests.fixtures.synthetic_vendor import write_synthetic_vendor_dataset
 
 from ivs_forecast.config import AppConfig
 from ivs_forecast.data.clean import clean_contracts_day
 from ivs_forecast.data.collapse_nodes import build_surface_nodes
 from ivs_forecast.data.dfw import default_grid_definition, fit_dfw_surface, sample_dfw
-from ivs_forecast.data.discovery import parse_trade_date_from_filename
+from ivs_forecast.data.discovery import (
+    audit_vendor_corpus,
+    inventory_raw_files,
+    parse_trade_date_from_filename,
+)
 from ivs_forecast.data.parity_forward import estimate_forward_terms
 from ivs_forecast.data.schema import reconcile_schema
 
@@ -102,3 +110,59 @@ def test_clean_forward_collapse_and_dfw() -> None:
     sampled = sample_dfw(fit.coefficients, default_grid_definition())
     assert sampled.shape == (154,)
     assert sampled.min() >= 0.01
+
+
+def test_audit_vendor_corpus_succeeds_on_synthetic_data(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    write_synthetic_vendor_dataset(raw_root, n_dates=3)
+    records = inventory_raw_files(raw_root, date(2020, 1, 2), date(2020, 1, 31))
+    report = audit_vendor_corpus(
+        records=records,
+        underlying_symbol="^SPX",
+        start_date=date(2020, 1, 2),
+        end_date=date(2020, 1, 31),
+    )
+    assert report["pass_status"] is True
+    assert report["raw_zip_count"] == 3
+    assert report["missing_required_columns"] == []
+    assert report["selected_underlying_caveats"]["active_underlying_price_1545_usable"] is True
+
+
+def test_audit_vendor_corpus_rejects_quote_date_mismatch(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    write_synthetic_vendor_dataset(raw_root, n_dates=1)
+    zip_path = raw_root / "UnderlyingOptionsEODCalcs_2020-01-02.zip"
+    with zipfile.ZipFile(zip_path) as handle:
+        csv_name = handle.namelist()[0]
+        payload = handle.read(csv_name).decode("utf-8")
+    broken_payload = payload.replace("2020-01-02", "2020-01-03", 1)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        handle.writestr(csv_name, broken_payload)
+    records = inventory_raw_files(raw_root, date(2020, 1, 2), date(2020, 1, 31))
+    with pytest.raises(ValueError, match="quote_date contents disagreed"):
+        audit_vendor_corpus(
+            records=records,
+            underlying_symbol="^SPX",
+            start_date=date(2020, 1, 2),
+            end_date=date(2020, 1, 31),
+        )
+
+
+def test_audit_vendor_corpus_rejects_missing_calcs_columns(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    write_synthetic_vendor_dataset(raw_root, n_dates=1)
+    zip_path = raw_root / "UnderlyingOptionsEODCalcs_2020-01-02.zip"
+    with zipfile.ZipFile(zip_path) as handle:
+        csv_name = handle.namelist()[0]
+        frame = pl.read_csv(io.BytesIO(handle.read(csv_name)))
+    frame = frame.drop("vega_1545")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        handle.writestr(csv_name, frame.write_csv())
+    records = inventory_raw_files(raw_root, date(2020, 1, 2), date(2020, 1, 31))
+    with pytest.raises(ValueError, match="Calcs-required 15:45 fields were missing"):
+        audit_vendor_corpus(
+            records=records,
+            underlying_symbol="^SPX",
+            start_date=date(2020, 1, 2),
+            end_date=date(2020, 1, 31),
+        )

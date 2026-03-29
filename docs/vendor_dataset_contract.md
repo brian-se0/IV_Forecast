@@ -9,6 +9,7 @@ Required ZIP rules:
 - exactly one CSV member;
 - filename date must match `quote_date`;
 - unreadable ZIPs, missing CSVs, or multiple CSV members are fatal.
+- `verify-data` audits every supported ZIP in the configured date window rather than sampling only one file.
 
 Canonical required columns for this repository:
 
@@ -51,3 +52,10 @@ Observed-vs-documented note:
 
 - local raw files and the vendor layout PDF use `*_1545`;
 - any `*_15453` references are treated as stale documentation aliases and not as required columns.
+
+Audit caveats recorded by `verify-data`:
+
+- quote-only files are unsupported and do not satisfy the v1 contract;
+- missing `*_1545` calcs fields are fatal;
+- zero or missing underlying bid/ask rates are summarized for the selected underlying;
+- early-close dates are recorded from the in-repo curated half-day table as audit-only metadata.

@@ -3,17 +3,28 @@ from __future__ import annotations
 import json
 import re
 import zipfile
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from statistics import mean
+from typing import Any
 
 import polars as pl
 
 from ivs_forecast.artifacts.hashing import sha256_file
-from ivs_forecast.data.schema import reconcile_schema
+from ivs_forecast.data.early_closes import early_close_dates_in_range
+from ivs_forecast.data.schema import (
+    CALCS_REQUIRED_COLUMNS,
+    CANONICAL_REQUIRED_COLUMNS,
+    CSV_SCHEMA_OVERRIDES,
+    DOCUMENTED_COLUMNS,
+    reconcile_schema,
+)
 
 RAW_FILE_PATTERN = re.compile(r"^UnderlyingOptionsEODCalcs_(\d{4}-\d{2}-\d{2})\.zip$")
+QUOTE_ONLY_PATTERN = re.compile(r"^UnderlyingOptionsEODQuotes_(\d{4}-\d{2}-\d{2})\.zip$")
 
 
 @dataclass(frozen=True)
@@ -37,6 +48,12 @@ def parse_trade_date_from_filename(path: Path) -> date:
 def _iter_supported_files(root: Path) -> Iterable[Path]:
     for path in sorted(root.glob("UnderlyingOptionsEODCalcs_*.zip")):
         if RAW_FILE_PATTERN.match(path.name):
+            yield path
+
+
+def _iter_quote_only_files(root: Path) -> Iterable[Path]:
+    for path in sorted(root.glob("UnderlyingOptionsEODQuotes_*.zip")):
+        if QUOTE_ONLY_PATTERN.match(path.name):
             yield path
 
 
@@ -75,11 +92,24 @@ def inventory_raw_files(root: Path, start_date: date, end_date: date) -> list[Ra
         trade_date = parse_trade_date_from_filename(path)
         if start_date <= trade_date <= end_date:
             records.append(inspect_zip(path))
-    if not records:
+    if records:
+        return records
+    quote_only = [
+        path
+        for path in _iter_quote_only_files(root)
+        if start_date
+        <= date.fromisoformat(QUOTE_ONLY_PATTERN.match(path.name).group(1))
+        <= end_date
+    ]
+    if quote_only:
         raise FileNotFoundError(
-            f"No matching UnderlyingOptionsEODCalcs_*.zip files found under {root} for {start_date}..{end_date}."
+            "Only quote-only vendor ZIPs were found in the configured window. "
+            "The v1 pipeline requires UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip files."
         )
-    return records
+    raise FileNotFoundError(
+        f"No matching UnderlyingOptionsEODCalcs_*.zip files found under {root} for "
+        f"{start_date}..{end_date}."
+    )
 
 
 def raw_inventory_frame(records: list[RawZipRecord]) -> pl.DataFrame:
@@ -96,26 +126,294 @@ def raw_inventory_frame(records: list[RawZipRecord]) -> pl.DataFrame:
     ).sort("trade_date")
 
 
-def header_schema_report(sample_path: Path) -> dict[str, object]:
-    with zipfile.ZipFile(sample_path) as handle:
+def _read_zip_csv(path: Path) -> pl.DataFrame:
+    with zipfile.ZipFile(path) as handle:
         csv_members = [
             item.filename for item in handle.infolist() if item.filename.lower().endswith(".csv")
         ]
         if len(csv_members) != 1:
-            raise ValueError(
-                f"Expected exactly one CSV in {sample_path}, found {len(csv_members)}."
-            )
+            raise ValueError(f"Expected exactly one CSV in {path}, found {len(csv_members)}.")
         with handle.open(csv_members[0], "r") as csv_handle:
-            sample = pl.read_csv(
+            return pl.read_csv(
                 csv_handle,
-                n_rows=100,
-                infer_schema_length=100,
+                schema_overrides=CSV_SCHEMA_OVERRIDES,
+                infer_schema_length=500,
                 try_parse_dates=True,
+                ignore_errors=False,
             )
-    reconciliation = reconcile_schema(
-        sample.columns, {name: str(dtype) for name, dtype in sample.schema.items()}
+
+
+def _null_rate_summary(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"min": 0.0, "mean": 0.0, "max": 0.0}
+    return {
+        "min": float(min(values)),
+        "mean": float(mean(values)),
+        "max": float(max(values)),
+    }
+
+
+def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) -> dict[str, float | int]:
+    if "underlying_symbol" not in frame.columns:
+        return {
+            "selected_underlying_rows": 0,
+            "zero_or_missing_underlying_bid_ask_rows": 0,
+            "positive_active_underlying_price_rows": 0,
+        }
+    subset = frame.filter(pl.col("underlying_symbol") == underlying_symbol)
+    if subset.is_empty():
+        return {
+            "selected_underlying_rows": 0,
+            "zero_or_missing_underlying_bid_ask_rows": 0,
+            "positive_active_underlying_price_rows": 0,
+        }
+    if {"underlying_bid_1545", "underlying_ask_1545"}.issubset(subset.columns):
+        zero_or_missing = subset.select(
+            (
+                pl.col("underlying_bid_1545").is_null()
+                | (pl.col("underlying_bid_1545") <= 0)
+                | pl.col("underlying_ask_1545").is_null()
+                | (pl.col("underlying_ask_1545") <= 0)
+            )
+            .sum()
+            .alias("count")
+        ).item()
+    else:
+        zero_or_missing = subset.height
+    positive_active = (
+        subset.select(
+            (
+                pl.col("active_underlying_price_1545").is_not_null()
+                & (pl.col("active_underlying_price_1545") > 0)
+            )
+            .sum()
+            .alias("count")
+        ).item()
+        if "active_underlying_price_1545" in subset.columns
+        else 0
     )
-    return reconciliation.to_dict()
+    return {
+        "selected_underlying_rows": subset.height,
+        "zero_or_missing_underlying_bid_ask_rows": int(zero_or_missing),
+        "positive_active_underlying_price_rows": int(positive_active),
+    }
+
+
+def audit_vendor_corpus(
+    records: list[RawZipRecord],
+    underlying_symbol: str,
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    invalid_zip_files = [
+        str(record.path) for record in records if (not record.readable or record.csv_member_count != 1)
+    ]
+    if invalid_zip_files:
+        raise ValueError(
+            "Raw ZIP validation failed because some files were unreadable or did not contain exactly "
+            f"one CSV member: {invalid_zip_files[:5]}"
+        )
+
+    reference_columns: list[str] | None = None
+    observed_columns_union: set[str] = set()
+    missing_required_union: set[str] = set()
+    extra_columns_union: set[str] = set()
+    files_with_header_anomalies: list[str] = []
+    files_with_quote_date_mismatch: list[str] = []
+    files_with_missing_required: dict[str, list[str]] = {}
+    files_with_missing_calcs: dict[str, list[str]] = {}
+    files_with_extra_columns: dict[str, list[str]] = {}
+    dtype_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    null_rates: dict[str, list[float]] = defaultdict(list)
+    selected_underlying_rows = 0
+    zero_or_missing_underlying_bid_ask_rows = 0
+    positive_active_underlying_price_rows = 0
+    file_reports: list[dict[str, Any]] = []
+
+    for record in records:
+        frame = _read_zip_csv(record.path)
+        reconciliation = reconcile_schema(
+            frame.columns, {name: str(dtype) for name, dtype in frame.schema.items()}
+        )
+        quote_dates = (
+            frame["quote_date"].drop_nulls().unique().sort().to_list() if "quote_date" in frame.columns else []
+        )
+        quote_date_match = (
+            "quote_date" in frame.columns
+            and frame["quote_date"].null_count() == 0
+            and quote_dates == [record.trade_date]
+        )
+        if not quote_date_match:
+            files_with_quote_date_mismatch.append(str(record.path))
+        if reference_columns is None:
+            reference_columns = list(frame.columns)
+        header_anomaly = list(frame.columns) != reference_columns
+        if header_anomaly or reconciliation.missing_required_columns or reconciliation.extra_columns:
+            files_with_header_anomalies.append(str(record.path))
+        if reconciliation.missing_required_columns:
+            files_with_missing_required[str(record.path)] = reconciliation.missing_required_columns
+        missing_calcs = [
+            column for column in CALCS_REQUIRED_COLUMNS if column not in set(frame.columns)
+        ]
+        if missing_calcs:
+            files_with_missing_calcs[str(record.path)] = missing_calcs
+        if reconciliation.extra_columns:
+            files_with_extra_columns[str(record.path)] = reconciliation.extra_columns
+        observed_columns_union.update(frame.columns)
+        missing_required_union.update(reconciliation.missing_required_columns)
+        extra_columns_union.update(reconciliation.extra_columns)
+        for column, dtype in frame.schema.items():
+            dtype_counts[column][str(dtype)] += 1
+            null_rates[column].append(frame[column].null_count() / max(frame.height, 1))
+        caveats = _selected_underlying_caveats(frame, underlying_symbol)
+        selected_underlying_rows += int(caveats["selected_underlying_rows"])
+        zero_or_missing_underlying_bid_ask_rows += int(caveats["zero_or_missing_underlying_bid_ask_rows"])
+        positive_active_underlying_price_rows += int(caveats["positive_active_underlying_price_rows"])
+        file_reports.append(
+            {
+                "file_path": str(record.path),
+                "trade_date": record.trade_date.isoformat(),
+                "row_count": frame.height,
+                "quote_date_values": [value.isoformat() for value in quote_dates],
+                "quote_date_match": quote_date_match,
+                "missing_required_columns": reconciliation.missing_required_columns,
+                "missing_calcs_columns": missing_calcs,
+                "extra_columns": reconciliation.extra_columns,
+                "header_anomaly": header_anomaly,
+                "inferred_dtypes": {name: str(dtype) for name, dtype in frame.schema.items()},
+            }
+        )
+
+    if files_with_quote_date_mismatch:
+        raise ValueError(
+            "Filename date and quote_date contents disagreed for files including: "
+            f"{files_with_quote_date_mismatch[:5]}"
+        )
+    if files_with_missing_calcs:
+        raise ValueError(
+            "Calcs-required 15:45 fields were missing in files including: "
+            f"{list(files_with_missing_calcs)[:5]}"
+        )
+    if files_with_missing_required:
+        raise ValueError(
+            "Vendor schema reconciliation failed because required columns were missing in files "
+            f"including: {list(files_with_missing_required)[:5]}"
+        )
+
+    zero_or_missing_fraction = (
+        zero_or_missing_underlying_bid_ask_rows / selected_underlying_rows
+        if selected_underlying_rows
+        else 0.0
+    )
+    active_price_positive_fraction = (
+        positive_active_underlying_price_rows / selected_underlying_rows
+        if selected_underlying_rows
+        else 0.0
+    )
+    early_close_dates = early_close_dates_in_range(start_date, end_date)
+    return {
+        "pass_status": True,
+        "study_window": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "underlying_symbol": underlying_symbol,
+        },
+        "raw_zip_count": len(records),
+        "documented_columns": list(DOCUMENTED_COLUMNS),
+        "observed_columns_union": sorted(observed_columns_union),
+        "missing_required_columns": sorted(missing_required_union),
+        "extra_columns": sorted(extra_columns_union),
+        "files_with_header_anomalies": files_with_header_anomalies,
+        "files_with_quote_date_mismatch": files_with_quote_date_mismatch,
+        "files_with_missing_required_columns": files_with_missing_required,
+        "files_with_missing_calcs_columns": files_with_missing_calcs,
+        "files_with_extra_columns": files_with_extra_columns,
+        "column_summaries": {
+            column: {
+                "observed_file_count": int(sum(dtype_counts[column].values())),
+                "dtype_counts": dict(sorted(dtype_counts[column].items())),
+                "null_rate_summary": _null_rate_summary(null_rates[column]),
+                "required": column in CANONICAL_REQUIRED_COLUMNS,
+                "calcs_required": column in CALCS_REQUIRED_COLUMNS,
+                "documented": column in DOCUMENTED_COLUMNS,
+            }
+            for column in sorted(observed_columns_union)
+        },
+        "selected_underlying_caveats": {
+            "underlying_symbol": underlying_symbol,
+            "selected_underlying_rows": selected_underlying_rows,
+            "zero_or_missing_underlying_bid_ask_rows": zero_or_missing_underlying_bid_ask_rows,
+            "zero_or_missing_underlying_bid_ask_fraction": float(zero_or_missing_fraction),
+            "positive_active_underlying_price_rows": positive_active_underlying_price_rows,
+            "positive_active_underlying_price_fraction": float(active_price_positive_fraction),
+            "active_underlying_price_1545_usable": active_price_positive_fraction == 1.0,
+        },
+        "early_close_audit": {
+            "calendar_name": "curated_us_options_half_days_v1",
+            "dates_in_range": [item.isoformat() for item in early_close_dates],
+            "count": len(early_close_dates),
+        },
+        "caveat_counts": {
+            "header_anomaly_count": len(files_with_header_anomalies),
+            "extra_column_file_count": len(files_with_extra_columns),
+            "early_close_count": len(early_close_dates),
+        },
+        "notes": [
+            "The audit is corpus-wide across the configured date window.",
+            "Calcs-required semantics are enforced via the required 15:45 vendor fields.",
+            "Early-close dates are audit-only and do not alter the 1545 column contract.",
+        ],
+        "files": file_reports,
+    }
+
+
+def data_audit_markdown(report: dict[str, Any]) -> str:
+    lines = ["# Data Audit Report", ""]
+    window = report["study_window"]
+    lines.append(
+        f"Study window: `{window['start_date']}` to `{window['end_date']}` for "
+        f"`{window['underlying_symbol']}`."
+    )
+    lines.append(f"Audited raw ZIP count: `{report['raw_zip_count']}`.")
+    lines.append("")
+    lines.append("## Schema")
+    lines.append(
+        f"Missing required columns across corpus: `{report['missing_required_columns']}`."
+    )
+    lines.append(f"Extra columns across corpus: `{report['extra_columns']}`.")
+    lines.append(
+        f"Header anomaly files: `{report['caveat_counts']['header_anomaly_count']}`."
+    )
+    lines.append("")
+    lines.append("## Selected Underlying Caveats")
+    caveats = report["selected_underlying_caveats"]
+    lines.append(f"Selected underlying rows: `{caveats['selected_underlying_rows']}`.")
+    lines.append(
+        "Zero or missing underlying bid/ask fraction: "
+        f"`{caveats['zero_or_missing_underlying_bid_ask_fraction']:.6f}`."
+    )
+    lines.append(
+        "Positive active-underlying-price fraction: "
+        f"`{caveats['positive_active_underlying_price_fraction']:.6f}`."
+    )
+    lines.append(
+        "Active underlying price usable: "
+        f"`{caveats['active_underlying_price_1545_usable']}`."
+    )
+    lines.append("")
+    lines.append("## Early Closes")
+    early_close = report["early_close_audit"]
+    lines.append(
+        f"Curated half-day count in range: `{early_close['count']}`."
+    )
+    if early_close["dates_in_range"]:
+        lines.append(f"Half-days: `{', '.join(early_close['dates_in_range'])}`.")
+    lines.append("")
+    lines.append("## Notes")
+    for note in report["notes"]:
+        lines.append(f"- {note}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def write_inventory_json(path: Path, records: list[RawZipRecord]) -> None:

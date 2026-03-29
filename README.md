@@ -179,9 +179,11 @@ uv run ivs-forecast verify-data --config configs/experiments/spx_1d.yaml
 This checks:
 
 * ZIP readability
-* filename/date consistency
-* required columns
+* one-CSV-per-ZIP integrity
+* filename-vs-`quote_date` consistency across the full corpus
+* required and calcs-required columns
 * documentation-vs-observed schema differences
+* selected-underlying caveats and early-close audit metadata
 
 ### 2. Run the full experiment
 
@@ -208,7 +210,9 @@ uv run ivs-forecast report --run-dir artifacts/runs/<run_id>
 A successful run writes:
 
 * raw inventory and schema reconciliation reports
-* cleaned contract parquet files
+* human-readable data audit report
+* partitioned cleaned-contract datasets plus a date index
+* partitioned surface-node datasets plus a date index
 * forward-estimation diagnostics
 * fixed-grid sampled surfaces
 * feature/target datasets
@@ -250,6 +254,7 @@ Every run records:
 * package versions
 * Python version
 * CUDA/device information
+* per-model device assignments
 * random seed
 * upstream artifact lineage
 

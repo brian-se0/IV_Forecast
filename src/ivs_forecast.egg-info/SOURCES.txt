@@ -4,6 +4,11 @@ src/ivs_forecast/__init__.py
 src/ivs_forecast/cli.py
 src/ivs_forecast/config.py
 src/ivs_forecast/logging_utils.py
+src/ivs_forecast.egg-info/._PKG-INFO
+src/ivs_forecast.egg-info/._dependency_links.txt
+src/ivs_forecast.egg-info/._entry_points.txt
+src/ivs_forecast.egg-info/._requires.txt
+src/ivs_forecast.egg-info/._top_level.txt
 src/ivs_forecast.egg-info/PKG-INFO
 src/ivs_forecast.egg-info/SOURCES.txt
 src/ivs_forecast.egg-info/dependency_links.txt
@@ -18,6 +23,7 @@ src/ivs_forecast/data/clean.py
 src/ivs_forecast/data/collapse_nodes.py
 src/ivs_forecast/data/dfw.py
 src/ivs_forecast/data/discovery.py
+src/ivs_forecast/data/early_closes.py
 src/ivs_forecast/data/ingest.py
 src/ivs_forecast/data/parity_forward.py
 src/ivs_forecast/data/sampled_surface.py
