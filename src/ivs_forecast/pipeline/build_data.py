@@ -143,7 +143,9 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
     write_polars(surface_nodes_index_path, partition_index_frame(surface_partition_records))
     if not forward_frames:
         raise ValueError("Forward estimation failed for all expiries in the selected date range.")
-    forward_terms = pl.concat(forward_frames, how="vertical_relaxed").sort(["quote_date", "expiration"])
+    forward_terms = pl.concat(forward_frames, how="vertical_relaxed").sort(
+        ["quote_date", "root", "expiration"]
+    )
     if forward_terms.is_empty():
         raise ValueError("Forward estimation failed for all expiries in the selected date range.")
     forward_terms_path = run_root / "forward_terms.parquet"
@@ -156,6 +158,7 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
                 "quote_date": pl.Date,
                 "surface_node_count": pl.Int64,
                 "valid_expiry_count": pl.Int64,
+                "root_count": pl.Int64,
                 "modeling_valid": pl.Boolean,
             }
         )

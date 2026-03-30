@@ -21,6 +21,7 @@ from ivs_forecast.data.discovery import (
 )
 from ivs_forecast.data.parity_forward import estimate_forward_terms
 from ivs_forecast.data.schema import reconcile_schema
+from ivs_forecast.pipeline.forecast import evaluate_straddle_signal
 
 
 def _config() -> AppConfig:
@@ -110,6 +111,77 @@ def test_clean_forward_collapse_and_dfw() -> None:
     sampled = sample_dfw(fit.coefficients, default_grid_definition())
     assert sampled.shape == (154,)
     assert sampled.min() >= 0.01
+
+
+def test_forward_terms_keep_roots_separate_and_mixed_root_dates_fail_fast() -> None:
+    quote_date = date(2020, 1, 2)
+    expiration = date(2020, 3, 2)
+    rows = []
+    root_specs = {"SPX": (0.0, 0.23), "SPXW": (0.3, 0.19)}
+    for root, (premium_shift, sigma) in root_specs.items():
+        for strike in (90.0, 100.0, 110.0):
+            call_mid = max(0.0, 100.0 - strike) + 5.0 + premium_shift
+            put_mid = call_mid - (100.0 - strike)
+            for option_type, mid, delta in [("C", call_mid, 0.5), ("P", put_mid, -0.5)]:
+                rows.append(
+                    {
+                        "underlying_symbol": "^SPX",
+                        "quote_date": quote_date,
+                        "root": root,
+                        "expiration": expiration,
+                        "strike": strike,
+                        "option_type": option_type,
+                        "bid_1545": mid - 0.1,
+                        "ask_1545": mid + 0.1,
+                        "active_underlying_price_1545": 100.0,
+                        "implied_volatility_1545": sigma,
+                        "delta_1545": delta,
+                        "vega_1545": 1.0,
+                        "trade_volume": 10,
+                        "open_interest": 100,
+                    }
+                )
+    clean, _ = clean_contracts_day(pl.DataFrame(rows), _config())
+    forward_terms, diagnostics = estimate_forward_terms(clean)
+    assert forward_terms.height == 2
+    assert set(forward_terms["root"].to_list()) == {"SPX", "SPXW"}
+    assert set(item.root for item in diagnostics) == {"SPX", "SPXW"}
+    with pytest.raises(ValueError, match="mixed option roots"):
+        build_surface_nodes(clean, forward_terms, _config())
+
+
+class _UnusedReconstructor:
+    def predict(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("Cross-root straddles should be rejected before reconstruction.")
+
+
+def test_straddle_selection_rejects_cross_root_pairs() -> None:
+    expiration = date(2020, 2, 3)
+    current_contracts = pl.DataFrame(
+        {
+            "root": ["SPX", "SPXW"],
+            "expiration": [expiration, expiration],
+            "strike": [100.0, 100.0],
+            "option_type": ["C", "P"],
+            "mid_1545": [5.0, 4.8],
+            "spread_1545": [0.2, 0.2],
+            "tau": [30.0 / 365.0, 30.0 / 365.0],
+            "m": [0.0, 0.0],
+        }
+    )
+    target_contracts = current_contracts
+    rows = evaluate_straddle_signal(
+        model_name="rw_last",
+        quote_date=date(2020, 1, 2),
+        target_date=date(2020, 1, 3),
+        current_contracts=current_contracts,
+        target_contracts=target_contracts,
+        predicted_sampled_iv=np.zeros(154, dtype=np.float64),
+        current_sampled_surface=pl.DataFrame({"iv_g000": [0.2], "iv_g001": [0.2]}),
+        reconstructor=_UnusedReconstructor(),  # type: ignore[arg-type]
+        atm_grid_map={30: "g000", 91: "g001"},
+    )
+    assert rows == []
 
 
 def test_audit_vendor_corpus_succeeds_on_synthetic_data(tmp_path: Path) -> None:

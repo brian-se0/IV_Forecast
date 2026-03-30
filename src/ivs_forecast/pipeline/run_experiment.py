@@ -363,11 +363,12 @@ def run_experiment(config: AppConfig) -> Path:
             "model_name",
             "forecast_origin",
             "target_date",
+            "root",
             "anchor_days",
             "gross_return",
             "net_return",
         ],
-        ["target_date", "model_name", "anchor_days"],
+        ["target_date", "model_name", "root", "anchor_days"],
     )
     write_polars(run_root / "loss_panel.parquet", loss_panel)
     write_polars(run_root / "arbitrage_panel.parquet", arbitrage_panel)

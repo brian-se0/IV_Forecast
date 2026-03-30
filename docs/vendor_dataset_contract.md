@@ -53,6 +53,11 @@ Observed-vs-documented note:
 - local raw files and the vendor layout PDF use `*_1545`;
 - any `*_15453` references are treated as stale documentation aliases and not as required columns.
 
+Root-handling note:
+
+- `root` is treated as the option-class key throughout forward estimation, node construction, and straddle pairing;
+- the v1 sampled-surface path supports only one homogeneous root per modeling date and fails fast on mixed-root dates.
+
 Audit caveats recorded by `verify-data`:
 
 - quote-only files are unsupported and do not satisfy the v1 contract;

@@ -11,6 +11,10 @@ def build_sampled_surfaces(surface_nodes: pl.DataFrame) -> tuple[pl.DataFrame, p
     grid = default_grid_definition()
     sampled_rows: list[dict[str, object]] = []
     for nodes in surface_nodes.partition_by("quote_date", maintain_order=True):
+        if "root" in nodes.columns and nodes["root"].n_unique() != 1:
+            raise ValueError(
+                "Sampled-surface construction requires exactly one option root per quote_date."
+            )
         fit = fit_dfw_surface(nodes)
         sampled_iv = sample_dfw(fit.coefficients, grid)
         row: dict[str, object] = {

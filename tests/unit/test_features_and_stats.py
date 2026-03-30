@@ -11,10 +11,12 @@ from ivs_forecast.config import AppConfig
 from ivs_forecast.evaluation.dm import diebold_mariano
 from ivs_forecast.features.dataset import (
     build_features_targets,
+    grid_ids,
     x_feature_columns,
     y_target_columns,
 )
 from ivs_forecast.models.base import features_matrix, target_matrix
+from ivs_forecast.models.pca_var1 import PcaVar1Model
 from ivs_forecast.models.reconstructor import (
     ReconstructorNetwork,
     _penalty_terms,
@@ -124,10 +126,106 @@ def test_feature_matrix_excludes_future_only_targets() -> None:
     assert not np.allclose(y[0], y[1])
 
 
+def test_adversarial_future_signal_does_not_enter_feature_rows() -> None:
+    rows = []
+    constant_iv = 0.2
+    for index in range(26):
+        if index <= 23:
+            iv = constant_iv
+        elif index == 24:
+            iv = 0.27
+        else:
+            iv = 0.31
+        row = {
+            "quote_date": date(2020, 1, 2) + timedelta(days=index),
+            "surface_node_count": 50,
+            "valid_expiry_count": 5,
+            "active_underlying_price_1545": 100.0,
+            "total_trade_volume": 1000,
+            "total_open_interest": 2000,
+            "median_rel_spread_1545": 0.01,
+        }
+        for grid_index in range(154):
+            shifted_iv = iv + 0.0001 * grid_index
+            row[f"iv_g{grid_index:03d}"] = shifted_iv
+            row[f"logiv_g{grid_index:03d}"] = float(np.log(shifted_iv))
+        rows.append(row)
+    features = build_features_targets(pl.DataFrame(rows))
+    first_two = features.head(2)
+    x = features_matrix(first_two)
+    y = target_matrix(first_two)
+    assert np.allclose(x[0], x[1])
+    assert not np.allclose(y[0], y[1])
+
+
+def _frame_from_surface_path(surfaces: np.ndarray) -> pl.DataFrame:
+    rows = []
+    zero_scalars = {
+        "underlying_logret_1": 0.0,
+        "underlying_logret_5": 0.0,
+        "underlying_logret_22": 0.0,
+        "log1p_total_trade_volume": 0.0,
+        "log1p_total_open_interest": 0.0,
+        "median_rel_spread_1545": 0.0,
+    }
+    ids = grid_ids()
+    for index in range(surfaces.shape[0] - 1):
+        row: dict[str, float] = dict(zero_scalars)
+        current = surfaces[index]
+        target = surfaces[index + 1]
+        for grid_index, grid_id in enumerate(ids):
+            row[f"x_curr_{grid_id}"] = float(current[grid_index])
+            row[f"x_ma5_{grid_id}"] = float(current[grid_index])
+            row[f"x_ma22_{grid_id}"] = float(current[grid_index])
+            row[f"y_{grid_id}"] = float(target[grid_index])
+        rows.append(row)
+    return pl.DataFrame(rows)
+
+
+def test_pca_var1_fits_explicit_three_factor_var() -> None:
+    mean = 0.15 + 0.0001 * np.arange(154, dtype=np.float64)
+    basis = np.zeros((3, 154), dtype=np.float64)
+    basis[0, 0] = 1.0
+    basis[1, 1] = 1.0
+    basis[2, 2] = 1.0
+    intercept = np.array([0.01, -0.02, 0.015], dtype=np.float64)
+    transition = np.array(
+        [
+            [0.70, 0.10, 0.00],
+            [0.05, 0.60, 0.15],
+            [0.10, 0.00, 0.50],
+        ],
+        dtype=np.float64,
+    )
+    scores = [np.array([0.08, -0.03, 0.02], dtype=np.float64)]
+    for _ in range(6):
+        scores.append(intercept + transition @ scores[-1])
+    surfaces = np.vstack([mean + basis.T @ score for score in scores])
+    frame = _frame_from_surface_path(surfaces)
+    model = PcaVar1Model()
+    train_frame = frame.head(5)
+    holdout = frame.slice(5, 1)
+    model.fit(train_frame)
+    prediction = model.predict(holdout)
+    assert np.allclose(prediction[0], holdout.select(y_target_columns()).to_numpy()[0], atol=1e-10)
+    artifact = model.artifact()
+    assert artifact.params["factor_count"] == 3
+    assert artifact.params["has_intercept"] is True
+    assert artifact.params["transition_shape"] == [3, 3]
+
+
 def test_diebold_mariano_runs() -> None:
     stat, p_value = diebold_mariano(np.array([1.0, 1.1, 0.9]), np.array([1.2, 1.3, 1.1]))
     assert np.isfinite(stat)
     assert 0.0 <= p_value <= 1.0
+
+
+def test_diebold_mariano_matches_regression_fixture() -> None:
+    loss_a = np.array([0.80, 1.00, 1.10, 0.95, 1.05, 0.90, 1.15, 0.98], dtype=np.float64)
+    loss_b = np.array([1.05, 1.10, 1.20, 1.08, 1.16, 1.02, 1.22, 1.09], dtype=np.float64)
+    stat, p_value = diebold_mariano(loss_a, loss_b, bandwidth=2, horizon=1)
+    assert stat == pytest.approx(-7.148256223078783)
+    assert p_value == pytest.approx(0.00018564281821276118)
 
 
 def test_diebold_mariano_rejects_invalid_inputs() -> None:

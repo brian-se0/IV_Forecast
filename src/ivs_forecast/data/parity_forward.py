@@ -9,6 +9,7 @@ import polars as pl
 @dataclass(frozen=True)
 class ForwardEstimationDiagnostics:
     quote_date: str
+    root: str
     expiration: str
     matched_pairs_before_prune: int
     matched_pairs_after_prune: int
@@ -31,8 +32,8 @@ def estimate_forward_terms(
 ) -> tuple[pl.DataFrame, list[ForwardEstimationDiagnostics]]:
     records: list[dict[str, object]] = []
     diagnostics: list[ForwardEstimationDiagnostics] = []
-    for (quote_date, expiration), group in clean_contracts.partition_by(
-        ["quote_date", "expiration"], as_dict=True
+    for (quote_date, root, expiration), group in clean_contracts.partition_by(
+        ["quote_date", "root", "expiration"], as_dict=True
     ).items():
         calls = group.filter(pl.col("option_type") == "C").select(
             "strike", pl.col("mid_1545").alias("call_mid"), pl.col("vega_1545").alias("call_vega")
@@ -47,6 +48,7 @@ def estimate_forward_terms(
             diagnostics.append(
                 ForwardEstimationDiagnostics(
                     quote_date=str(quote_date),
+                    root=str(root),
                     expiration=str(expiration),
                     matched_pairs_before_prune=before,
                     matched_pairs_after_prune=0,
@@ -82,6 +84,7 @@ def estimate_forward_terms(
                 records.append(
                     {
                         "quote_date": quote_date,
+                        "root": root,
                         "expiration": expiration,
                         "discount_factor": float(discount_factor),
                         "forward_price": float(forward_price),
@@ -92,10 +95,11 @@ def estimate_forward_terms(
         diagnostics.append(
             ForwardEstimationDiagnostics(
                 quote_date=str(quote_date),
+                root=str(root),
                 expiration=str(expiration),
                 matched_pairs_before_prune=before,
                 matched_pairs_after_prune=after,
                 invalid_reason=invalid_reason,
             )
         )
-    return pl.DataFrame(records).sort(["quote_date", "expiration"]), diagnostics
+    return pl.DataFrame(records).sort(["quote_date", "root", "expiration"]), diagnostics

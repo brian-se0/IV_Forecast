@@ -40,3 +40,9 @@ Each stage also writes `manifests/<stage_name>_manifest.json` plus
 `manifests/<stage_name>_resolved_config.yaml`.
 
 Run directories are immutable unless overwrite is explicitly requested.
+
+Schema notes:
+
+- `forward_terms.parquet` carries `quote_date`, `root`, and `expiration` keys for root-safe parity fits.
+- `surface_nodes/` partitions carry `root` so node construction and downstream evaluation cannot silently mix contract classes.
+- `straddle_signal_utility.parquet` records the root used for each selected straddle pair.

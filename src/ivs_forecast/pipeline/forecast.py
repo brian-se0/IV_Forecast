@@ -17,7 +17,9 @@ from ivs_forecast.models.reconstructor import FittedReconstructor
 def contracts_with_forward(
     clean_contracts: pl.DataFrame, forward_terms: pl.DataFrame
 ) -> pl.DataFrame:
-    joined = clean_contracts.join(forward_terms, on=["quote_date", "expiration"], how="inner")
+    joined = clean_contracts.join(
+        forward_terms, on=["quote_date", "root", "expiration"], how="inner"
+    )
     return joined.with_columns(
         pl.struct(["strike", "forward_price"])
         .map_elements(
@@ -67,7 +69,7 @@ def evaluate_node_forecast(
         target_nodes["node_vega"].to_numpy().astype(np.float64),
     )
     node_predictions = target_nodes.select(
-        "quote_date", "expiration", "strike", "m", "tau", "node_iv", "node_vega"
+        "quote_date", "root", "expiration", "strike", "m", "tau", "node_iv", "node_vega"
     ).with_columns(
         pl.lit(model_name).alias("model_name"),
         pl.lit(quote_date).alias("forecast_origin"),
@@ -138,8 +140,8 @@ def evaluate_pricing_utility(
 
 def _bucket_contracts(
     current_contracts: pl.DataFrame,
-) -> dict[str, tuple[object, object, float, str]]:
-    buckets: dict[str, tuple[object, object, float, str]] = {}
+) -> dict[str, tuple[str, object, object, float, str]]:
+    buckets: dict[str, tuple[str, object, object, float, str]] = {}
     rules = [
         ("atm_call_30d", "C", 30.0 / 365.0),
         ("atm_put_30d", "P", 30.0 / 365.0),
@@ -158,6 +160,7 @@ def _bucket_contracts(
         if candidate.height == 1:
             row = candidate.row(0, named=True)
             buckets[bucket_name] = (
+                str(row["root"]),
                 row["expiration"],
                 row["strike"],
                 row["tau"],
@@ -202,9 +205,10 @@ def evaluate_hedged_pnl_utility(
         }
     ]
     buckets = _bucket_contracts(current_contracts)
-    for bucket_name, (expiration, strike, _tau, option_type) in buckets.items():
+    for bucket_name, (root, expiration, strike, _tau, option_type) in buckets.items():
         bucket_joined = joined.filter(
-            (pl.col("expiration") == expiration)
+            (pl.col("root") == root)
+            & (pl.col("expiration") == expiration)
             & (pl.col("strike") == strike)
             & (pl.col("option_type") == option_type)
         )
@@ -242,8 +246,10 @@ def evaluate_straddle_signal(
     atm_grid_map: dict[int, str],
 ) -> list[dict[str, Any]]:
     matched = current_contracts.join(
-        current_contracts.filter(pl.col("option_type") == "P").select(["expiration", "strike"]),
-        on=["expiration", "strike"],
+        current_contracts.filter(pl.col("option_type") == "P").select(
+            ["root", "expiration", "strike"]
+        ),
+        on=["root", "expiration", "strike"],
         how="inner",
     )
     if matched.is_empty():
@@ -251,7 +257,7 @@ def evaluate_straddle_signal(
     rows: list[dict[str, Any]] = []
     for anchor_days in (30, 91):
         atm_candidates = (
-            current_contracts.group_by(["expiration", "strike"])
+            current_contracts.group_by(["root", "expiration", "strike"])
             .agg(
                 pl.col("option_type").sort().alias("option_types"),
                 pl.col("mid_1545").sum().alias("gross_premium"),
@@ -271,7 +277,9 @@ def evaluate_straddle_signal(
             continue
         pair = atm_candidates.row(0, named=True)
         next_pair = target_contracts.filter(
-            (pl.col("expiration") == pair["expiration"]) & (pl.col("strike") == pair["strike"])
+            (pl.col("root") == pair["root"])
+            & (pl.col("expiration") == pair["expiration"])
+            & (pl.col("strike") == pair["strike"])
         )
         if next_pair.height < 2:
             continue
@@ -296,6 +304,7 @@ def evaluate_straddle_signal(
                 "model_name": model_name,
                 "forecast_origin": quote_date,
                 "target_date": target_date,
+                "root": pair["root"],
                 "anchor_days": anchor_days,
                 "gross_return": gross_return,
                 "net_return": net_return,

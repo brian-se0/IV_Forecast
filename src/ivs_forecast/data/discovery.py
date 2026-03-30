@@ -153,12 +153,16 @@ def _null_rate_summary(values: list[float]) -> dict[str, float]:
     }
 
 
-def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) -> dict[str, float | int]:
+def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) -> dict[str, Any]:
     if "underlying_symbol" not in frame.columns:
         return {
             "selected_underlying_rows": 0,
             "zero_or_missing_underlying_bid_ask_rows": 0,
             "positive_active_underlying_price_rows": 0,
+            "distinct_root_count": 0,
+            "root_row_counts": {},
+            "mixed_root_date_count": 0,
+            "mixed_root_dates": [],
         }
     subset = frame.filter(pl.col("underlying_symbol") == underlying_symbol)
     if subset.is_empty():
@@ -166,6 +170,10 @@ def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) ->
             "selected_underlying_rows": 0,
             "zero_or_missing_underlying_bid_ask_rows": 0,
             "positive_active_underlying_price_rows": 0,
+            "distinct_root_count": 0,
+            "root_row_counts": {},
+            "mixed_root_date_count": 0,
+            "mixed_root_dates": [],
         }
     if {"underlying_bid_1545", "underlying_ask_1545"}.issubset(subset.columns):
         zero_or_missing = subset.select(
@@ -192,10 +200,27 @@ def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) ->
         if "active_underlying_price_1545" in subset.columns
         else 0
     )
+    root_row_counts = {
+        str(row["root"]): int(row["row_count"])
+        for row in subset.group_by("root").len(name="row_count").sort("root").iter_rows(named=True)
+    }
+    mixed_root_dates_frame = (
+        subset.group_by("quote_date")
+        .agg(pl.col("root").n_unique().alias("root_count"))
+        .filter(pl.col("root_count") > 1)
+        .sort("quote_date")
+    )
+    mixed_root_dates = [
+        value.isoformat() for value in mixed_root_dates_frame["quote_date"].to_list()
+    ]
     return {
         "selected_underlying_rows": subset.height,
         "zero_or_missing_underlying_bid_ask_rows": int(zero_or_missing),
         "positive_active_underlying_price_rows": int(positive_active),
+        "distinct_root_count": len(root_row_counts),
+        "root_row_counts": root_row_counts,
+        "mixed_root_date_count": mixed_root_dates_frame.height,
+        "mixed_root_dates": mixed_root_dates,
     }
 
 
@@ -228,6 +253,8 @@ def audit_vendor_corpus(
     selected_underlying_rows = 0
     zero_or_missing_underlying_bid_ask_rows = 0
     positive_active_underlying_price_rows = 0
+    root_row_counts_total: Counter[str] = Counter()
+    mixed_root_dates: set[str] = set()
     file_reports: list[dict[str, Any]] = []
 
     for record in records:
@@ -269,6 +296,8 @@ def audit_vendor_corpus(
         selected_underlying_rows += int(caveats["selected_underlying_rows"])
         zero_or_missing_underlying_bid_ask_rows += int(caveats["zero_or_missing_underlying_bid_ask_rows"])
         positive_active_underlying_price_rows += int(caveats["positive_active_underlying_price_rows"])
+        root_row_counts_total.update(caveats["root_row_counts"])
+        mixed_root_dates.update(caveats["mixed_root_dates"])
         file_reports.append(
             {
                 "file_path": str(record.path),
@@ -346,6 +375,10 @@ def audit_vendor_corpus(
             "zero_or_missing_underlying_bid_ask_fraction": float(zero_or_missing_fraction),
             "positive_active_underlying_price_rows": positive_active_underlying_price_rows,
             "positive_active_underlying_price_fraction": float(active_price_positive_fraction),
+            "distinct_root_count": len(root_row_counts_total),
+            "root_row_counts": dict(sorted(root_row_counts_total.items())),
+            "mixed_root_date_count": len(mixed_root_dates),
+            "mixed_root_dates": sorted(mixed_root_dates),
             "active_underlying_price_1545_usable": active_price_positive_fraction == 1.0,
         },
         "early_close_audit": {
@@ -396,6 +429,11 @@ def data_audit_markdown(report: dict[str, Any]) -> str:
         "Positive active-underlying-price fraction: "
         f"`{caveats['positive_active_underlying_price_fraction']:.6f}`."
     )
+    lines.append(f"Distinct option roots: `{caveats['distinct_root_count']}`.")
+    lines.append(f"Root row counts: `{caveats['root_row_counts']}`.")
+    lines.append(f"Mixed-root dates: `{caveats['mixed_root_date_count']}`.")
+    if caveats["mixed_root_dates"]:
+        lines.append(f"Mixed-root quote dates: `{', '.join(caveats['mixed_root_dates'])}`.")
     lines.append(
         "Active underlying price usable: "
         f"`{caveats['active_underlying_price_1545_usable']}`."

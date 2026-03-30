@@ -63,6 +63,7 @@ The validated research scope for v1 is:
 - **one underlying per experiment**;
 - **index underlyings only** for the supported methodology path;
 - default validated underlying: **`^SPX`**;
+- **one homogeneous option root per modeling date**;
 - forecast horizon: **1 next valid trading day**;
 - target timestamp: **next-day 15:45 U.S. Eastern implied-vol surface**.
 
@@ -210,18 +211,18 @@ The following columns are required for v1:
 - `option_type`
 - `bid_1545`
 - `ask_1545`
-- `active_underlying_price_15453`
-- `implied_volatility_15453`
-- `delta_15453`
-- `vega_15453`
+- `active_underlying_price_1545`
+- `implied_volatility_1545`
+- `delta_1545`
+- `vega_1545`
 - `trade_volume`
 - `open_interest`
 
 Optional but ingested if present:
 
-- `gamma_15453`
-- `theta_15453`
-- `rho_15453`
+- `gamma_1545`
+- `theta_1545`
+- `rho_1545`
 - `bid_eod`
 - `ask_eod`
 - `vwap`
@@ -229,7 +230,7 @@ Optional but ingested if present:
 
 Ignored for modeling:
 
-- `implied_underlying_price_15453` (deprecated)
+- `implied_underlying_price_1545` (deprecated)
 - `delivery_code` (deprecated / empty)
 
 ### 7.4 Vendor caveats that must be respected
@@ -468,9 +469,9 @@ For the selected underlying, keep rows satisfying:
 * `bid_1545 > 0`
 * `ask_1545 > 0`
 * `ask_1545 >= bid_1545`
-* `implied_volatility_15453 > 0`
-* `vega_15453 > 0`
-* `active_underlying_price_15453 > 0`
+* `implied_volatility_1545 > 0`
+* `vega_1545 > 0`
+* `active_underlying_price_1545 > 0`
 
 Compute:
 
@@ -490,9 +491,9 @@ The unique contract key is:
 
 ### 13.3 Forward estimation
 
-For each `(quote_date, expiration)`:
+For each `(quote_date, root, expiration)`:
 
-1. match calls and puts by strike;
+1. match calls and puts by strike within the same `root`;
 2. compute `y_j = C_mid_j - P_mid_j`;
 3. fit weighted linear model `y_j = alpha + beta * K_j` with weights `min(vega_call_j, vega_put_j)`;
 4. perform one outlier-pruning pass using a `5 x MAD` residual rule;
@@ -514,10 +515,16 @@ Invalidate the expiry if:
 
 The forecasting target is a **single IV surface**, not separate call and put surfaces.
 
+Because v1 writes one sampled surface per date, it must not silently blend distinct option classes into that surface. Therefore:
+
+* forward terms and node construction must carry `root`;
+* mixed-root dates are not allowed to continue into sampled-surface construction;
+* if more than one root survives on a modeling date, the pipeline must fail fast with a clear message rather than combining them.
+
 After forward estimation:
 
 * transform each contract to `(m, tau)` with `m = log(strike / forward_price)`;
-* for strike-expiry pairs with both call and put surviving, collapse to one node via vega-weighted IV average;
+* for strike-expiry pairs with both call and put surviving, collapse to one node via vega-weighted IV average within `(quote_date, root, expiration, strike)`;
 * if only one side survives, keep that node.
 
 The resulting object is a set of unique surface nodes per date.
@@ -878,7 +885,7 @@ Report:
 
 For every eligible contract:
 
-* hedge ratio is the **current-day vendor delta_15453**
+* hedge ratio is the **current-day vendor delta_1545**
 * realized 1-day hedged PnL:
 
   * `(mid_{t+1} - mid_t) - delta_t * (S_{t+1} - S_t)`
@@ -886,7 +893,7 @@ For every eligible contract:
 
   * `(price_hat_{t+1} - mid_t) - delta_t * (S_{t+1} - S_t)`
 
-Here `S_t` is `active_underlying_price_15453`.
+Here `S_t` is `active_underlying_price_1545`.
 
 Report:
 
@@ -905,6 +912,7 @@ This is the repository’s primary hedging-style diagnostic, motivated by the im
 For maturity anchors 30d and 91d:
 
 1. identify nearest-ATM matched call-put pair on date `t`;
+   the call and put must share the same `root`;
 2. compute model signal from predicted ATM IV change `sigma_hat_{t+1}(0, tau*) - sigma_t(0, tau*)`;
 3. go long the straddle if positive, short if negative;
 4. mark the 1-day PnL from current 15:45 mid to next-day 15:45 mid;

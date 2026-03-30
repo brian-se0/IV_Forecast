@@ -36,6 +36,7 @@ Version 1 is intentionally scoped to:
 - **one underlying per experiment**
 - **index underlyings only**
 - default validated symbol: **`^SPX`**
+- **one homogeneous option root per modeling date**
 - **1-day-ahead forecasting**
 - target timestamp: **next-day 15:45 ET**
 
@@ -78,8 +79,9 @@ If stale documentation refers to `*_15453`, the pipeline records that in the rec
 ### Important vendor notes
 
 - The `1545` columns remain named `1545` on early-close days.
-- `implied_volatility_15453` may be zero when the vendor calc engine cannot compute a valid IV; those rows are treated as invalid observations for IV-surface modeling.
+- `implied_volatility_1545` may be zero when the vendor calc engine cannot compute a valid IV; those rows are treated as invalid observations for IV-surface modeling.
 - Some underlying quote fields may be zero, especially for indices.
+- `root` is treated as the option-class key. The v1 sampled-surface path fails fast on mixed-root dates instead of blending classes such as `SPX` and `SPXW` into one surface.
 - This repo requires **calcs-included** files and will fail on quote-only files.
 
 ### Documentation-vs-local-data verification
@@ -285,6 +287,7 @@ This repo is designed for large historical datasets, but it is not designed to b
 * no external rates/dividend curves are required; forward quantities are estimated from matched call-put quotes.
 * downstream trading diagnostics are stylized research diagnostics, not production execution logic.
 * quote-only vendor files are unsupported.
+* mixed-root dates are unsupported in the single-surface v1 path and fail fast until a homogeneous root policy is supplied.
 
 ## Literature grounding
 
