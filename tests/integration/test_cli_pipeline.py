@@ -47,6 +47,7 @@ def test_cli_verify_data_on_synthetic_dataset(tmp_path: Path) -> None:
     for name in (
         "raw_inventory.parquet",
         "raw_inventory.json",
+        "raw_corpus_contract.json",
         "vendor_schema_reconciliation.json",
         "data_audit_report.md",
     ):
@@ -70,6 +71,9 @@ def test_cli_build_data_on_synthetic_dataset(tmp_path: Path) -> None:
         "ssvi_state.parquet",
         "ssvi_fit_diagnostics.parquet",
         "ssvi_certification.parquet",
+        "trading_date_index.parquet",
+        "feature_row_exclusions.parquet",
+        "settlement_convention.json",
         "features_targets.parquet",
     ):
         assert (run_dir / name).exists(), name
@@ -97,6 +101,7 @@ def test_cli_run_and_report_on_synthetic_dataset(tmp_path: Path) -> None:
     mandatory = [
         "raw_inventory.parquet",
         "raw_inventory.json",
+        "raw_corpus_contract.json",
         "vendor_schema_reconciliation.json",
         "data_audit_report.md",
         "clean_contracts_index.parquet",
@@ -106,6 +111,9 @@ def test_cli_run_and_report_on_synthetic_dataset(tmp_path: Path) -> None:
         "ssvi_state.parquet",
         "ssvi_fit_diagnostics.parquet",
         "ssvi_certification.parquet",
+        "trading_date_index.parquet",
+        "feature_row_exclusions.parquet",
+        "settlement_convention.json",
         "features_targets.parquet",
         "split_manifest.json",
         "loss_panel.parquet",

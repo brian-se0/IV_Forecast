@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -54,6 +54,12 @@ class SplitConfig(BaseModel):
     refit_frequency: int = 21
 
 
+class SettlementConfig(BaseModel):
+    settlement_style: Literal["AM_SOQ_PROXY"] = "AM_SOQ_PROXY"
+    proxy_time_eastern: time = time(hour=9, minute=30)
+    exact_clock: Literal[False] = False
+
+
 class RuntimeConfig(BaseModel):
     seed: int = 20260329
     overwrite: bool = False
@@ -69,6 +75,7 @@ class AppConfig(BaseModel):
     paths: PathConfig
     study: StudyConfig
     split: SplitConfig = Field(default_factory=SplitConfig)
+    settlement: SettlementConfig = Field(default_factory=SettlementConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     def model_config_dump(self) -> dict[str, Any]:

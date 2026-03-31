@@ -1,10 +1,10 @@
 # IVS Forecast
 
-A reproducible framework for root-explicit, chronology-safe, next-day implied-volatility-surface forecasting on Cboe Option EOD Summary files.
+A reproducible framework for root-explicit, chronology-safe, next-trading-day implied-volatility-surface forecasting on Cboe Option EOD Summary files.
 
 ## What this repository does
 
-The repo takes daily `UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip` files, filters them to `^SPX` and option root `SPX`, calibrates one arbitrage-aware daily SSVI surface state, forecasts the next valid trading day’s surface state, and evaluates the resulting surface forecasts on realized next-day nodes and contracts.
+The repo takes daily `UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip` files, filters them to `^SPX` and option root `SPX`, calibrates one arbitrage-aware daily SSVI surface state, forecasts the next trading day’s surface state, and evaluates the resulting surface forecasts on realized next-day nodes and contracts.
 
 The canonical representation is a direct daily SSVI state:
 
@@ -33,15 +33,16 @@ The end-to-end workflow is:
 
 1. Verify ZIP readability, one-CSV-per-ZIP integrity, filename/date agreement, and required `*_1545` calc fields.
 2. Audit observed schema against the documented vendor contract and report option-root coverage by date.
-3. Ingest `^SPX` rows and fail fast if the configured `option_root` is absent on any date in scope.
-4. Clean contracts using the vendor 15:45 snapshot, or 12:45 on curated early-close dates.
-5. Compute fractional ACT/365 time to the `SPX` expiration-date AM settlement timestamp.
-6. Estimate same-date forward terms by root and expiration using put-call parity.
-7. Collapse calls and puts into one node panel per date in log-forward-moneyness and fractional maturity coordinates.
-8. Calibrate one SSVI state per date with a deterministic Adam-then-LBFGS schedule and certify static arbitrage on a dense grid.
-9. Build a narrow feature index with 22-day chronology-safe history windows and same-day scalar regime/liquidity features.
-10. Train and compare exactly three models: `state_last`, `state_var1`, and `ssvi_tcn_direct`.
-11. Decode forecasts directly onto realized next-day nodes and contracts for loss, pricing, hedging, straddle, DM, and MCS outputs.
+3. Discover canonical daily ZIPs recursively under the configured raw root and fail fast if only grouped monthly/yearly archives are present.
+4. Ingest `^SPX` rows and fail fast if the configured `option_root` is absent on any date in scope.
+5. Clean contracts using the vendor 15:45 snapshot, or 12:45 on manifest-listed early-close dates.
+6. Compute fractional ACT/365 time to the `SPX` expiration-date `AM_SOQ_PROXY` settlement proxy.
+7. Estimate same-date forward terms by root and expiration using put-call parity.
+8. Collapse calls and puts into one node panel per date in log-forward-moneyness and fractional maturity coordinates.
+9. Calibrate one SSVI state per date with a deterministic Adam-then-LBFGS schedule and certify static arbitrage on a dense grid.
+10. Build a narrow feature index with 22-day chronology-safe history windows, same-day scalar regime/liquidity features, a checked trading-date index, and explicit row exclusions when the immediate next trading day lacks a valid target state.
+11. Train and compare exactly three models: `state_last`, `state_var1`, and `ssvi_tcn_direct`.
+12. Decode forecasts directly onto realized next-day nodes and contracts for loss, pricing, hedging, straddle, DM, and MCS outputs.
 
 ## Model set
 
@@ -56,6 +57,8 @@ No other forecasting families are implemented.
 ## Data expectations
 
 Raw ZIPs stay outside the repo. Configure the root with YAML, the `IVS_FORECAST_RAW_DATA_ROOT` env var, or `--raw-data-root`.
+
+Canonical daily ZIPs may be stored flat or in nested folders under the configured raw root. The runtime does not silently ingest monthly/yearly grouped archives.
 
 Canonical vendor columns include:
 
@@ -81,6 +84,12 @@ Important vendor notes:
 - `root` is treated as the option-class key
 - quote-only files are unsupported
 
+Settlement note:
+
+- standard `SPX` expiries are modeled with an explicit `AM_SOQ_PROXY` clock
+- the default proxy time is `09:30` ET
+- the proxy is versioned in artifacts and is not presented as an official exact settlement timestamp
+
 ## Configuration
 
 ```yaml
@@ -91,9 +100,14 @@ paths:
 study:
   underlying_symbol: "^SPX"
   option_root: "SPX"
-  start_date: "2004-01-02"
-  end_date: "2021-04-09"
+  start_date: "2012-01-03"
+  end_date: "2021-12-31"
   forecast_horizon_days: 1
+
+settlement:
+  settlement_style: "AM_SOQ_PROXY"
+  proxy_time_eastern: "09:30:00"
+  exact_clock: false
 ```
 
 ## Canonical commands
@@ -101,19 +115,19 @@ study:
 Verify raw files and schema:
 
 ```bash
-uv run ivs-forecast verify-data --config configs/experiments/spx_1d.yaml
+uv run ivs-forecast verify-data --config configs/experiments/spx_public_2012plus.yaml
 ```
 
 Build the immutable preprocessing artifacts:
 
 ```bash
-uv run ivs-forecast build-data --config configs/experiments/spx_1d.yaml
+uv run ivs-forecast build-data --config configs/experiments/spx_public_2012plus.yaml
 ```
 
 Run the full experiment:
 
 ```bash
-uv run ivs-forecast run --config configs/experiments/spx_1d.yaml
+uv run ivs-forecast run --config configs/experiments/spx_public_2012plus.yaml
 ```
 
 Regenerate the summary report for an existing run:
@@ -128,6 +142,7 @@ Build stage:
 
 - `raw_inventory.parquet`
 - `raw_inventory.json`
+- `raw_corpus_contract.json`
 - `vendor_schema_reconciliation.json`
 - `data_audit_report.md`
 - `clean_contracts/`
@@ -139,6 +154,9 @@ Build stage:
 - `ssvi_state.parquet`
 - `ssvi_fit_diagnostics.parquet`
 - `ssvi_certification.parquet`
+- `trading_date_index.parquet`
+- `feature_row_exclusions.parquet`
+- `settlement_convention.json`
 - `features_targets.parquet`
 
 Run stage:

@@ -17,10 +17,13 @@ from ivs_forecast.data.discovery import (
     audit_vendor_corpus,
     inventory_raw_files,
     parse_trade_date_from_filename,
+    raw_corpus_contract,
 )
+from ivs_forecast.data.early_closes import load_early_close_calendar
 from ivs_forecast.data.parity_forward import estimate_forward_terms
 from ivs_forecast.data.schema import reconcile_schema
 from ivs_forecast.data.time_to_settlement import (
+    settlement_policy_record,
     settlement_timestamp_eastern,
     snapshot_timestamp_eastern,
     year_fraction_act365,
@@ -95,16 +98,29 @@ def test_study_config_requires_option_root() -> None:
         )
 
 
-def test_snapshot_and_settlement_timestamps_apply_spx_am_rules() -> None:
+def test_snapshot_and_settlement_timestamps_apply_spx_soq_proxy_rules() -> None:
     normal_snapshot = snapshot_timestamp_eastern(date(2020, 11, 27), is_early_close=False)
     early_snapshot = snapshot_timestamp_eastern(date(2020, 11, 27), is_early_close=True)
-    settlement = settlement_timestamp_eastern(date(2020, 12, 18), "SPX")
+    config = _config()
+    settlement = settlement_timestamp_eastern(date(2020, 12, 18), "SPX", config.settlement)
+    policy_record = settlement_policy_record("SPX", config.settlement)
     assert normal_snapshot.hour == 15 and normal_snapshot.minute == 45
     assert early_snapshot.hour == 12 and early_snapshot.minute == 45
     assert settlement.hour == 9 and settlement.minute == 30
+    assert policy_record["settlement_style"] == "AM_SOQ_PROXY"
+    assert policy_record["proxy_time_eastern"] == "09:30"
+    assert policy_record["exact_clock"] is False
     normal_tau = year_fraction_act365(normal_snapshot, settlement)
     early_tau = year_fraction_act365(early_snapshot, settlement)
     assert early_tau > normal_tau
+
+
+def test_early_close_manifest_is_loaded_from_checked_in_resource() -> None:
+    calendar = load_early_close_calendar()
+    july_entries = calendar.entries_in_range(date(2021, 7, 1), date(2021, 7, 5))
+    assert calendar.calendar_name == "cboe_us_options_early_closes_manifest_v1"
+    assert july_entries[0].quote_date == date(2021, 7, 2)
+    assert july_entries[0].market_close_time_eastern == "12:45"
 
 
 def test_clean_forward_and_collapse_are_root_explicit() -> None:
@@ -210,3 +226,23 @@ def test_build_data_fails_when_configured_root_is_missing(tmp_path: Path) -> Non
     config = _config(str(raw_root), str(artifact_root))
     with pytest.raises(ValueError, match="configured option_root was absent"):
         build_data_stage(config)
+
+
+def test_inventory_raw_files_supports_nested_daily_layout(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    nested_root = raw_root / "year=2020" / "month=01"
+    write_synthetic_vendor_dataset(nested_root, n_dates=3)
+    records = inventory_raw_files(raw_root, date(2020, 1, 2), date(2020, 1, 31))
+    assert len(records) == 3
+    contract = raw_corpus_contract(raw_root, records, date(2020, 1, 2), date(2020, 1, 31), "SPX")
+    assert contract["grouping_mode"] == "nested_daily"
+
+
+def test_inventory_raw_files_rejects_grouped_archive_without_daily_zips(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir(parents=True, exist_ok=True)
+    grouped_path = raw_root / "UnderlyingOptionsEODCalcs_2020-01.zip"
+    with zipfile.ZipFile(grouped_path, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        handle.writestr("notes.txt", "grouped archive placeholder")
+    with pytest.raises(FileNotFoundError, match="grouped monthly/yearly calcs archives"):
+        inventory_raw_files(raw_root, date(2020, 1, 2), date(2020, 1, 31))

@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 
 from ivs_forecast.artifacts.hashing import sha256_file
-from ivs_forecast.data.early_closes import early_close_dates_in_range
+from ivs_forecast.data.early_closes import early_close_dates_in_range, load_early_close_calendar
 from ivs_forecast.data.schema import (
     CALCS_REQUIRED_COLUMNS,
     CANONICAL_REQUIRED_COLUMNS,
@@ -25,6 +25,8 @@ from ivs_forecast.data.schema import (
 
 RAW_FILE_PATTERN = re.compile(r"^UnderlyingOptionsEODCalcs_(\d{4}-\d{2}-\d{2})\.zip$")
 QUOTE_ONLY_PATTERN = re.compile(r"^UnderlyingOptionsEODQuotes_(\d{4}-\d{2}-\d{2})\.zip$")
+GROUPED_CALCS_PATTERN = re.compile(r"^UnderlyingOptionsEODCalcs_(\d{4}|\d{4}-\d{2})\.zip$")
+GROUPED_QUOTES_PATTERN = re.compile(r"^UnderlyingOptionsEODQuotes_(\d{4}|\d{4}-\d{2})\.zip$")
 
 
 @dataclass(frozen=True)
@@ -46,14 +48,26 @@ def parse_trade_date_from_filename(path: Path) -> date:
 
 
 def _iter_supported_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.glob("UnderlyingOptionsEODCalcs_*.zip")):
+    for path in sorted(root.rglob("UnderlyingOptionsEODCalcs_*.zip")):
         if RAW_FILE_PATTERN.match(path.name):
             yield path
 
 
 def _iter_quote_only_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.glob("UnderlyingOptionsEODQuotes_*.zip")):
+    for path in sorted(root.rglob("UnderlyingOptionsEODQuotes_*.zip")):
         if QUOTE_ONLY_PATTERN.match(path.name):
+            yield path
+
+
+def _iter_grouped_archives(root: Path) -> Iterable[Path]:
+    for path in sorted(root.rglob("UnderlyingOptionsEODCalcs_*.zip")):
+        if GROUPED_CALCS_PATTERN.match(path.name) and not RAW_FILE_PATTERN.match(path.name):
+            yield path
+
+
+def _iter_grouped_quote_only_archives(root: Path) -> Iterable[Path]:
+    for path in sorted(root.rglob("UnderlyingOptionsEODQuotes_*.zip")):
+        if GROUPED_QUOTES_PATTERN.match(path.name) and not QUOTE_ONLY_PATTERN.match(path.name):
             yield path
 
 
@@ -86,6 +100,44 @@ def inspect_zip(path: Path) -> RawZipRecord:
     )
 
 
+def raw_corpus_contract(
+    root: Path,
+    records: list[RawZipRecord],
+    start_date: date,
+    end_date: date,
+    option_root: str,
+) -> dict[str, Any]:
+    grouped_archives = [path for path in _iter_grouped_archives(root)]
+    relative_dirs = {
+        str(record.path.parent.relative_to(root)) if record.path.parent != root else "."
+        for record in records
+    }
+    grouping_mode = "flat_daily" if relative_dirs in [set(), {"."}] else "nested_daily"
+    observed_start = min((record.trade_date for record in records), default=None)
+    observed_end = max((record.trade_date for record in records), default=None)
+    return {
+        "raw_data_root": str(root),
+        "requested_window": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        },
+        "observed_window": {
+            "start_date": observed_start.isoformat() if observed_start else None,
+            "end_date": observed_end.isoformat() if observed_end else None,
+        },
+        "daily_zip_count": len(records),
+        "grouping_mode": grouping_mode,
+        "relative_parent_directories": sorted(relative_dirs),
+        "selected_option_root": option_root,
+        "unsupported_grouped_archives": [str(path.relative_to(root)) for path in grouped_archives],
+        "notes": [
+            "Recursive discovery supports canonical daily UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip files.",
+            "Daily files may be stored flat or in nested folders under the configured raw_data_root.",
+            "Monthly/yearly grouped archives are detected and reported explicitly.",
+        ],
+    }
+
+
 def inventory_raw_files(root: Path, start_date: date, end_date: date) -> list[RawZipRecord]:
     records: list[RawZipRecord] = []
     for path in _iter_supported_files(root):
@@ -94,6 +146,14 @@ def inventory_raw_files(root: Path, start_date: date, end_date: date) -> list[Ra
             records.append(inspect_zip(path))
     if records:
         return records
+    grouped_archives = [path for path in _iter_grouped_archives(root)]
+    if grouped_archives:
+        raise FileNotFoundError(
+            "Only grouped monthly/yearly calcs archives were found in the configured window. "
+            "The runtime currently requires canonical daily UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip "
+            "files, but it will discover them recursively under nested folders once present. "
+            f"Examples: {[str(path) for path in grouped_archives[:3]]}"
+        )
     quote_only = [
         path
         for path in _iter_quote_only_files(root)
@@ -105,6 +165,12 @@ def inventory_raw_files(root: Path, start_date: date, end_date: date) -> list[Ra
         raise FileNotFoundError(
             "Only quote-only vendor ZIPs were found in the configured window. "
             "The v1 pipeline requires UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip files."
+        )
+    grouped_quote_only = [path for path in _iter_grouped_quote_only_archives(root)]
+    if grouped_quote_only:
+        raise FileNotFoundError(
+            "Only grouped monthly/yearly quote-only archives were found in the configured window. "
+            "The v1 pipeline requires daily calcs-included files."
         )
     raise FileNotFoundError(
         f"No matching UnderlyingOptionsEODCalcs_*.zip files found under {root} for "
@@ -370,6 +436,7 @@ def audit_vendor_corpus(
         if selected_underlying_rows
         else 0.0
     )
+    early_close_calendar = load_early_close_calendar()
     early_close_dates = early_close_dates_in_range(start_date, end_date)
     return {
         "pass_status": True,
@@ -426,7 +493,9 @@ def audit_vendor_corpus(
             "root_counts_by_date": sorted(root_coverage_by_date, key=lambda item: item["quote_date"]),
         },
         "early_close_audit": {
-            "calendar_name": "curated_us_options_half_days_v1",
+            "calendar_name": early_close_calendar.calendar_name,
+            "coverage_start": early_close_calendar.coverage_start.isoformat(),
+            "coverage_end": early_close_calendar.coverage_end.isoformat(),
             "dates_in_range": [item.isoformat() for item in early_close_dates],
             "count": len(early_close_dates),
         },
@@ -438,7 +507,7 @@ def audit_vendor_corpus(
         "notes": [
             "The audit is corpus-wide across the configured date window.",
             "Calcs-required semantics are enforced via the required 15:45 vendor fields.",
-            "Early-close dates are audit-only and do not alter the 1545 column contract.",
+            "Early-close dates come from the checked-in manifest and do not alter the 1545 column contract.",
             "Option-root coverage is reported by date before any modeling artifacts are built.",
         ],
         "files": file_reports,
@@ -499,7 +568,11 @@ def data_audit_markdown(report: dict[str, Any]) -> str:
     lines.append("## Early Closes")
     early_close = report["early_close_audit"]
     lines.append(
-        f"Curated half-day count in range: `{early_close['count']}`."
+        f"Manifest half-day count in range: `{early_close['count']}`."
+    )
+    lines.append(
+        "Manifest coverage: "
+        f"`{early_close['coverage_start']}` to `{early_close['coverage_end']}`."
     )
     if early_close["dates_in_range"]:
         lines.append(f"Half-days: `{', '.join(early_close['dates_in_range'])}`.")

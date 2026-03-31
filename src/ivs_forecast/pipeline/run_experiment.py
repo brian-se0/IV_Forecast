@@ -107,19 +107,22 @@ def _summary_markdown(
     pricing_utility: pl.DataFrame,
     hedged_utility: pl.DataFrame,
     straddle_rows: pl.DataFrame,
+    feature_exclusions: pl.DataFrame,
     selected_models: dict[str, dict[str, Any] | None],
 ) -> str:
     study = config_dump["study"]
+    settlement = config_dump["settlement"]
     lines = ["# Experiment Summary", ""]
     lines.append("## Study")
     lines.append(
         f"- underlying_symbol: `{study['underlying_symbol']}`; option_root: `{study['option_root']}`; representation: `direct_ssvi_state`"
     )
     lines.append(
-        "- snapshot policy: forecast origin is after the close on date `t`, using the vendor 15:45 ET surface snapshot, or 12:45 ET on curated early-close days."
+        "- snapshot policy: forecast origin is after the close on date `t`, using the vendor 15:45 ET surface snapshot, or 12:45 ET on manifest-listed early-close days."
     )
     lines.append(
-        "- settlement policy: `SPX` maturities use fractional ACT/365 time from the snapshot to the expiration-date AM settlement timestamp."
+        "- settlement policy: `SPX` maturities use fractional ACT/365 time from the snapshot to an explicit `AM_SOQ_PROXY` clock. "
+        f"The configured proxy is `{settlement['proxy_time_eastern']}` ET with `exact_clock={settlement['exact_clock']}`."
     )
     lines.append("")
     lines.append("## Literature Positioning")
@@ -127,6 +130,16 @@ def _summary_markdown(
         "This repo now implements a root-explicit, one-step, supervised, arbitrage-aware next-day IVS forecaster. It does not use the older two-step grid-then-decoder design, and it does not claim a generic nonlinear or generative novelty story."
     )
     lines.append("")
+    if not feature_exclusions.is_empty():
+        lines.append("## Feature Index")
+        for row in (
+            feature_exclusions.group_by("exclusion_reason")
+            .len(name="count")
+            .sort("exclusion_reason")
+            .iter_rows(named=True)
+        ):
+            lines.append(f"- `{row['exclusion_reason']}`: `{int(row['count'])}`")
+        lines.append("")
     lines.append("## Selected Models")
     for model_name in MODEL_FAMILIES:
         lines.append(
@@ -197,6 +210,7 @@ def write_summary_report(run_dir: Path) -> Path:
     pricing_utility = pl.read_parquet(run_dir / "pricing_utility.parquet")
     hedged_utility = pl.read_parquet(run_dir / "hedged_pnl_utility.parquet")
     straddle_rows = pl.read_parquet(run_dir / "straddle_signal_utility.parquet")
+    feature_exclusions = pl.read_parquet(run_dir / "feature_row_exclusions.parquet")
     selected_models = json.loads(
         (run_dir / "selected_model_configs.json").read_text(encoding="utf-8")
     )
@@ -210,6 +224,7 @@ def write_summary_report(run_dir: Path) -> Path:
         pricing_utility=pricing_utility,
         hedged_utility=hedged_utility,
         straddle_rows=straddle_rows,
+        feature_exclusions=feature_exclusions,
         selected_models=selected_models,
     )
     summary_path = run_dir / "summary.md"

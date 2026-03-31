@@ -5,9 +5,14 @@ paths:
 study:
   underlying_symbol: "^SPX"
   option_root: "SPX"
-  start_date: "2004-01-02"
-  end_date: "2008-03-31"
+  start_date: "2012-01-03"
+  end_date: "2013-12-31"
   forecast_horizon_days: 1
+
+settlement:
+  settlement_style: "AM_SOQ_PROXY"
+  proxy_time_eastern: "09:30:00"
+  exact_clock: false
 
 split:
   validation_size: 84

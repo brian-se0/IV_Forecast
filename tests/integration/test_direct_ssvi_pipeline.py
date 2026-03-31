@@ -41,14 +41,25 @@ def test_build_data_stage_writes_direct_ssvi_artifacts(tmp_path: Path) -> None:
     assert (run_root / "ssvi_state.parquet").exists()
     assert (run_root / "ssvi_fit_diagnostics.parquet").exists()
     assert (run_root / "ssvi_certification.parquet").exists()
+    assert (run_root / "trading_date_index.parquet").exists()
+    assert (run_root / "feature_row_exclusions.parquet").exists()
+    assert (run_root / "settlement_convention.json").exists()
     legacy_surface_name = "_".join(["sampled", "surface", "wide.parquet"])
     assert not (run_root / legacy_surface_name).exists()
     features = pl.read_parquet(run_root / "features_targets.parquet")
+    trading_index = pl.read_parquet(run_root / "trading_date_index.parquet")
     assert "option_root" in features.columns
     assert "history_start_index" in features.columns
     assert "history_end_index" in features.columns
     assert "surface_state_row_index" in features.columns
     assert "target_state_row_index" in features.columns
+    assert "next_trading_date" in trading_index.columns
+    joined = features.join(
+        trading_index.select(["quote_date", "next_trading_date"]),
+        on="quote_date",
+        how="left",
+    )
+    assert joined["target_date"].to_list() == joined["next_trading_date"].to_list()
     assert not any(column.startswith("x_curr_") for column in features.columns)
     assert not any(column.startswith("y_g") for column in features.columns)
 

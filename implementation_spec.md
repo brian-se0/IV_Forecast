@@ -62,12 +62,12 @@ Allowed date-`t` inputs include:
 - the vendor 15:45 IV and Greeks snapshot
 - same-day end-of-day volume, OHLC, VWAP, and open-interest summaries
 
-The target is the realized surface on the next valid modeling date `t+1`.
+The target is the realized surface on the next trading date `t+1` in the raw/root inventory.
 
 Chronology rules:
 
 - train dates < validation dates < test dates
-- target dates are always the next available modeling dates
+- target dates are always the next trading dates in the raw/root inventory
 - history windows stop at date `t`
 - normalization is fit only on rows available at the current refit point
 - no target-day columns may enter origin-day features
@@ -81,8 +81,8 @@ Time-to-settlement is fractional ACT/365, not integer-day `dte / 365`.
 Rules:
 
 - normal-day snapshot timestamp: `15:45` ET
-- curated early-close snapshot timestamp: `12:45` ET
-- `SPX` settlement timestamp: expiration-date AM settlement session
+- manifest-listed early-close snapshot timestamp: `12:45` ET
+- `SPX` settlement uses an explicit `AM_SOQ_PROXY` policy with a versioned proxy clock and `exact_clock = false`
 
 If a post-filter date contains zero rows for the configured option root, preprocessing fails.
 
@@ -91,6 +91,12 @@ If a post-filter date contains zero rows for the configured option root, preproc
 Supported raw files:
 
 - `UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip`
+
+Discovery rules:
+
+- recursive discovery of canonical daily files under the configured raw root is supported
+- flat and nested daily directory layouts are supported
+- monthly/yearly grouped archives must be detected explicitly and reported in the corpus contract
 
 Fatal conditions:
 
@@ -106,6 +112,7 @@ The verification stage must write:
 
 - `raw_inventory.parquet`
 - `raw_inventory.json`
+- `raw_corpus_contract.json`
 - `vendor_schema_reconciliation.json`
 - `data_audit_report.md`
 
@@ -134,6 +141,9 @@ These artifacts are immutable once written:
 - `ssvi_state.parquet`
 - `ssvi_fit_diagnostics.parquet`
 - `ssvi_certification.parquet`
+- `trading_date_index.parquet`
+- `feature_row_exclusions.parquet`
+- `settlement_convention.json`
 - `features_targets.parquet`
 
 ## 7. SSVI calibration
@@ -183,6 +193,8 @@ Required scalar features:
 - valid-expiry count
 
 The full state history is assembled at training time from `ssvi_state.parquet`, not materialized into the parquet feature index.
+
+`trading_date_index.parquet` must prove that each kept feature row targets the immediate next trading date in the raw/root inventory. If a trading date is missing a valid origin or target SSVI state, the origin row must be dropped and recorded in `feature_row_exclusions.parquet`; the pipeline must not skip forward to a later target date.
 
 ## 9. Model set
 

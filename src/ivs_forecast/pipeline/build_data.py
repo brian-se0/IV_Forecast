@@ -13,6 +13,7 @@ from ivs_forecast.data.discovery import (
     audit_vendor_corpus,
     data_audit_markdown,
     inventory_raw_files,
+    raw_corpus_contract,
     raw_inventory_frame,
     write_inventory_json,
 )
@@ -28,7 +29,12 @@ from ivs_forecast.data.ssvi import (
     calibrate_daily_ssvi,
     static_arb_certification,
 )
-from ivs_forecast.features.dataset import build_features_targets, state_z_columns
+from ivs_forecast.data.time_to_settlement import settlement_policy_record
+from ivs_forecast.features.dataset import (
+    build_features_targets,
+    build_trading_date_index,
+    state_z_columns,
+)
 from ivs_forecast.features.scalars import add_state_scalar_features
 from ivs_forecast.models.base import state_parameter_columns
 
@@ -47,10 +53,21 @@ def verify_data_stage(config: AppConfig) -> dict[str, Path]:
     inventory = raw_inventory_frame(records)
     inventory_path = run_root / "raw_inventory.parquet"
     inventory_json_path = run_root / "raw_inventory.json"
+    raw_corpus_contract_path = run_root / "raw_corpus_contract.json"
     schema_report_path = run_root / "vendor_schema_reconciliation.json"
     audit_report_path = run_root / "data_audit_report.md"
     write_polars(inventory_path, inventory)
     write_inventory_json(inventory_json_path, records)
+    write_json(
+        raw_corpus_contract_path,
+        raw_corpus_contract(
+            root=config.paths.raw_data_root,
+            records=records,
+            start_date=config.study.start_date,
+            end_date=config.study.end_date,
+            option_root=config.study.option_root,
+        ),
+    )
     schema_report = audit_vendor_corpus(
         records=records,
         underlying_symbol=config.study.underlying_symbol,
@@ -68,6 +85,7 @@ def verify_data_stage(config: AppConfig) -> dict[str, Path]:
         primary_artifact_paths=[
             inventory_path,
             inventory_json_path,
+            raw_corpus_contract_path,
             schema_report_path,
             audit_report_path,
         ],
@@ -83,6 +101,7 @@ def verify_data_stage(config: AppConfig) -> dict[str, Path]:
     return {
         "run_root": run_root,
         "inventory_path": inventory_path,
+        "raw_corpus_contract_path": raw_corpus_contract_path,
         "schema_report_path": schema_report_path,
         "audit_report_path": audit_report_path,
     }
@@ -123,12 +142,18 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
     verify_outputs = verify_data_stage(config)
     run_root = verify_outputs["run_root"]
     inventory = pl.read_parquet(verify_outputs["inventory_path"])
+    settlement_convention_path = run_root / "settlement_convention.json"
+    write_json(
+        settlement_convention_path,
+        settlement_policy_record(config.study.option_root, config.settlement),
+    )
     raw_records = inventory_raw_files(
         config.paths.raw_data_root,
         config.study.start_date,
         config.study.end_date,
     )
     subset_paths = stream_ingest_selected_underlying(config, raw_records)
+    trading_dates = [_subset_path_quote_date(path) for path in sorted(subset_paths)]
     clean_contracts_root = run_root / "clean_contracts"
     surface_nodes_root = run_root / "surface_nodes"
     clean_partition_records: list[DatePartitionRecord] = []
@@ -251,9 +276,29 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
     write_polars(ssvi_state_path, ssvi_state)
     write_polars(ssvi_fit_path, ssvi_fit_diagnostics)
     write_polars(ssvi_certification_path, ssvi_certification)
-    features_targets = build_features_targets(ssvi_state)
+    trading_date_index = build_trading_date_index(
+        trading_dates=trading_dates,
+        option_root=config.study.option_root,
+        ssvi_state=ssvi_state,
+    )
+    trading_date_index_path = run_root / "trading_date_index.parquet"
+    write_polars(trading_date_index_path, trading_date_index)
+    feature_artifacts = build_features_targets(ssvi_state, trading_date_index)
+    feature_row_exclusions_path = run_root / "feature_row_exclusions.parquet"
+    write_polars(feature_row_exclusions_path, feature_artifacts.exclusions)
+    features_targets = feature_artifacts.features_targets
     features_targets_path = run_root / "features_targets.parquet"
     write_polars(features_targets_path, features_targets)
+    exclusion_counts = (
+        {
+            str(row["exclusion_reason"]): int(row["count"])
+            for row in feature_artifacts.exclusions.group_by("exclusion_reason")
+            .len(name="count")
+            .iter_rows(named=True)
+        }
+        if not feature_artifacts.exclusions.is_empty()
+        else {}
+    )
     write_stage_bundle(
         run_root / "manifests",
         "build_data",
@@ -267,6 +312,9 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
             ssvi_state_path,
             ssvi_fit_path,
             ssvi_certification_path,
+            trading_date_index_path,
+            feature_row_exclusions_path,
+            settlement_convention_path,
             features_targets_path,
         ],
         counts={
@@ -275,7 +323,9 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
             "clean_contract_partitions": len(clean_partition_records),
             "surface_node_partitions": len(surface_partition_records),
             "ssvi_state_rows": ssvi_state.height,
+            "trading_dates": trading_date_index.height,
             "feature_rows": features_targets.height,
+            "feature_row_exclusions": feature_artifacts.exclusions.height,
         },
         diagnostics={
             "clean_contracts_rows": clean_contract_rows,
@@ -283,9 +333,11 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
             "surface_node_rows": surface_node_rows,
             "forward_invalid_count": forward_invalid_count,
             "exact_duplicates_removed": exact_duplicates_removed,
+            "feature_row_exclusion_counts": exclusion_counts,
         },
         upstream_paths=[
             verify_outputs["inventory_path"],
+            verify_outputs["raw_corpus_contract_path"],
             verify_outputs["schema_report_path"],
             verify_outputs["audit_report_path"],
         ],
@@ -300,5 +352,8 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
         "ssvi_state_path": ssvi_state_path,
         "ssvi_fit_path": ssvi_fit_path,
         "ssvi_certification_path": ssvi_certification_path,
+        "trading_date_index_path": trading_date_index_path,
+        "feature_row_exclusions_path": feature_row_exclusions_path,
+        "settlement_convention_path": settlement_convention_path,
         "features_targets_path": features_targets_path,
     }

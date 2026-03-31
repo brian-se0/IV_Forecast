@@ -27,6 +27,7 @@ def verify_data(
     resolved = load_config(config, raw_data_root_override=raw_data_root)
     outputs = verify_data_stage(resolved)
     console.print(f"Wrote inventory to {outputs['inventory_path']}")
+    console.print(f"Wrote raw corpus contract to {outputs['raw_corpus_contract_path']}")
     console.print(f"Wrote reconciliation to {outputs['schema_report_path']}")
     console.print(f"Wrote audit report to {outputs['audit_report_path']}")
 

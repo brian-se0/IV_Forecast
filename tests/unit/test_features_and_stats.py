@@ -10,7 +10,7 @@ import torch
 from ivs_forecast.config import AppConfig
 from ivs_forecast.data.ssvi import raw_to_constrained_params, ssvi_implied_vol
 from ivs_forecast.evaluation.dm import diebold_mariano
-from ivs_forecast.features.dataset import build_features_targets
+from ivs_forecast.features.dataset import build_features_targets, build_trading_date_index
 from ivs_forecast.features.scalars import add_state_scalar_features
 from ivs_forecast.models.base import (
     DailyStateStore,
@@ -64,9 +64,19 @@ def _ssvi_state_panel(n_dates: int = 32) -> pl.DataFrame:
     return add_state_scalar_features(pl.DataFrame(rows))
 
 
+def _feature_artifacts(
+    state_panel: pl.DataFrame,
+    trading_dates: list[date] | None = None,
+):
+    ordered_trading_dates = trading_dates or state_panel["quote_date"].to_list()
+    trading_index = build_trading_date_index(ordered_trading_dates, "SPX", state_panel)
+    return build_features_targets(state_panel, trading_index)
+
+
 def test_build_features_targets_and_split_manifest() -> None:
     state_panel = _ssvi_state_panel(32)
-    features = build_features_targets(state_panel)
+    artifacts = _feature_artifacts(state_panel)
+    features = artifacts.features_targets
     assert features.height == 10
     assert features["quote_date"][0] == state_panel["quote_date"][21]
     assert features["target_date"][0] == state_panel["quote_date"][22]
@@ -103,8 +113,8 @@ def test_future_shock_does_not_enter_origin_feature_rows() -> None:
         .alias("total_trade_volume")
     )
     shocked_panel = add_state_scalar_features(shocked_panel)
-    baseline_features = build_features_targets(baseline_panel)
-    shocked_features = build_features_targets(shocked_panel)
+    baseline_features = _feature_artifacts(baseline_panel).features_targets
+    shocked_features = _feature_artifacts(shocked_panel).features_targets
     assert shocked_features["log_total_trade_volume"][0] == pytest.approx(
         baseline_features["log_total_trade_volume"][0]
     )
@@ -118,7 +128,7 @@ def test_normalization_fit_only_on_training_rows() -> None:
         .alias("surface_fit_rmse_iv")
     )
     state_store = DailyStateStore.from_frame(state_panel)
-    features = build_features_targets(state_panel)
+    features = _feature_artifacts(state_panel).features_targets
     train_rows = features.head(6)
     stats = fit_normalization(train_rows, state_store, history_days=10)
     expected_indices = unique_history_indices(train_rows, history_days=10)
@@ -130,7 +140,7 @@ def test_normalization_fit_only_on_training_rows() -> None:
 def test_state_var1_artifact_shape() -> None:
     state_panel = _ssvi_state_panel(30)
     state_store = DailyStateStore.from_frame(state_panel)
-    features = build_features_targets(state_panel)
+    features = _feature_artifacts(state_panel).features_targets
     model = StateVar1Model()
     model.fit(features.head(6), state_store)
     prediction = model.predict(features.slice(6, 1), state_store)
@@ -177,6 +187,29 @@ def test_refit_boundary_guard() -> None:
         assert_refit_window_precedes_chunk(
             available_rows.vstack(chunk_rows), chunk_rows, "unit_test_refit"
         )
+
+
+def test_build_features_targets_does_not_skip_missing_trading_day() -> None:
+    trading_dates = _ssvi_state_panel(26)["quote_date"].to_list()
+    missing_date = trading_dates[23]
+    state_panel = (
+        _ssvi_state_panel(26)
+        .filter(pl.col("quote_date") != missing_date)
+        .drop("state_row_index")
+        .with_row_index("state_row_index")
+    )
+    prior_date = trading_dates[trading_dates.index(missing_date) - 1]
+    following_date = trading_dates[trading_dates.index(missing_date) + 1]
+    artifacts = _feature_artifacts(state_panel, trading_dates=trading_dates)
+    features = artifacts.features_targets
+    exclusions = artifacts.exclusions
+    assert not features.filter(
+        (pl.col("quote_date") == prior_date)
+        & (pl.col("target_date") == following_date)
+    ).height
+    excluded = exclusions.filter(pl.col("quote_date") == prior_date)
+    assert excluded["exclusion_reason"].to_list() == ["missing_target_state"]
+    assert excluded["target_date"].to_list() == [missing_date]
 
 
 def test_ssvi_tcn_forward_pass_and_masked_loss() -> None:

@@ -16,7 +16,7 @@ Your job is execution, not research redesign. The intellectual choices have alre
 
 2. **Chronology safety is non-negotiable.**
    - No randomized train/validation/test splits.
-   - No fitting scalers, PCA loadings, reconstructor weights, or model hyperparameters on future data.
+   - No fitting scalers or model hyperparameters on future data.
    - No feature that uses date `t+1` information to predict date `t+1`.
 
 3. **The source PDF is authoritative for equations.**
@@ -55,7 +55,6 @@ Use only the approved stack unless the spec is formally revised:
 - `typer`
 - `rich`
 - `torch`
-- `xgboost`
 - `pytest`
 - `ruff`
 
@@ -91,10 +90,12 @@ If a new dependency appears necessary, stop and justify it explicitly.
 You must implement:
 
 - file discovery for `UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip`;
+- recursive discovery of canonical daily files under the configured raw root;
 - ZIP readability checks;
 - one-CSV-per-ZIP validation;
 - documented-vs-observed schema reconciliation;
-- machine-readable reconciliation reports.
+- machine-readable reconciliation reports;
+- `raw_corpus_contract.json`.
 
 You must stop and ask if observed data materially conflict with the design, especially if:
 
@@ -108,7 +109,7 @@ You must stop and ask if observed data materially conflict with the design, espe
 - Forecast origin is **after close on date `t`**.
 - Target is **15:45 surface on next valid date `t+1`**.
 - Same-day EOD volume/OHLC/VWAP may be used as date-`t` features only because the forecast origin is after close.
-- The sampled surface itself is always built from date-`t` 15:45 IVs.
+- The calibrated daily SSVI surface state is always built from date-`t` 15:45 IVs.
 - Contract-level evaluation may query the predicted surface at the realized next-day contract coordinates. That is allowed because it defines the evaluation domain, not the forecast values.
 
 Explicitly test:
@@ -116,16 +117,15 @@ Explicitly test:
 - all train dates < all validation dates < all test dates;
 - feature windows stop at date `t`;
 - no target column leaks into model input;
-- reconstructor is fit only on the currently available expanding window.
+- target dates equal the immediate next trading dates in the raw/root calendar.
 
 ## Modeling rules
 
 Implement only these model families:
 
-- `rw_last`
-- `pca_var1`
-- `xgb_direct`
-- `lstm_direct`
+- `state_last`
+- `state_var1`
+- `ssvi_tcn_direct`
 
 Do not add:
 
@@ -136,24 +136,22 @@ Do not add:
 - deep RL hedger
 - extra baselines
 
-The shared reconstructor is part of the pipeline and is not optional.
+There is no shared reconstructor stage in the supported pipeline.
 
 ## CUDA, performance, and memory rules
 
 GPU-required stages:
 
-- reconstructor
-- LSTM
-- XGBoost
+- `ssvi_tcn_direct`
 
 Rules:
 
 - if CUDA is unavailable for a GPU-required stage, abort;
-- do not silently run those stages on CPU;
+- do not silently run that stage on CPU;
 - do not bulk-load the full raw history into memory;
 - stream ZIPs;
 - write parquet early;
-- batch reconstructor queries and contract-level evaluation;
+- batch contract-level evaluation;
 - use `float64` for financial transforms and evaluation, `float32` for neural training.
 
 No AMP / mixed precision in v1 unless the spec is revised.
@@ -192,7 +190,7 @@ Minimum required before considering a task complete:
 - smoke run compatibility maintained;
 - no broken CLI command paths.
 
-If you touch chronology logic, data cleaning, forward estimation, sampled-surface construction, reconstructor penalties, or evaluation metrics, add or update tests immediately.
+If you touch chronology logic, data cleaning, forward estimation, SSVI calibration, settlement timing, or evaluation metrics, add or update tests immediately.
 
 ## When you must stop and ask
 

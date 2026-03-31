@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 
 from ivs_forecast.config import AppConfig
-from ivs_forecast.data.early_closes import CURATED_EARLY_CLOSE_DATES
+from ivs_forecast.data.early_closes import early_close_date_set
 from ivs_forecast.data.time_to_settlement import (
     settlement_timestamp_eastern,
     snapshot_timestamp_eastern,
@@ -67,7 +67,7 @@ def clean_contracts_day(
             "Each daily contract frame must contain exactly one quote_date before cleaning."
         )
     quote_date = quote_dates[0]
-    is_early_close = quote_date in set(CURATED_EARLY_CLOSE_DATES)
+    is_early_close = quote_date in early_close_date_set(quote_date, quote_date)
     snapshot_ts = snapshot_timestamp_eastern(quote_date, is_early_close)
     filtered = (
         filtered_to_contract.with_columns(
@@ -101,7 +101,11 @@ def clean_contracts_day(
             .map_elements(
                 lambda expiration: year_fraction_act365(
                     snapshot_ts,
-                    settlement_timestamp_eastern(expiration, config.study.option_root),
+                    settlement_timestamp_eastern(
+                        expiration,
+                        config.study.option_root,
+                        config.settlement,
+                    ),
                 ),
                 return_dtype=pl.Float64,
             )
