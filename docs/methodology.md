@@ -1,17 +1,14 @@
 # Methodology
 
-This repository implements the ordered workflow defined in `implementation_spec.md`.
+This repository implements one ordered workflow:
 
-Version 1 uses:
+- verify and reconcile the vendor corpus
+- filter to `^SPX` and `option_root = "SPX"`
+- clean contracts and compute fractional time to settlement
+- estimate parity-implied forwards
+- collapse root-explicit surface nodes
+- calibrate one daily SSVI state
+- forecast the next day’s latent SSVI state
+- decode forecasts directly onto realized next-day nodes and contracts
 
-- one supported underlying per experiment;
-- index-underlying workflow only;
-- default validated symbol `^SPX`;
-- next-valid-day forecasting at the 15:45 ET surface;
-- a fixed 154-point sampled surface in log-forward-moneyness and maturity;
-- a shared arbitrage-aware reconstructor implemented from the source-paper PDF equations.
-
-Important implementation note:
-
-- the authoritative observed/vendor dataset schema in this repository is the `*_1545` field family;
-- reconciliation explicitly records this against any stale documentation that refers to alternate suffixes.
+The implementation is deliberately one-step and direct. The predicted surface state is the model output space, and downstream evaluation queries that surface directly rather than routing through an alternate representation.

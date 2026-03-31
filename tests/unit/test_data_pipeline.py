@@ -5,15 +5,14 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 import pytest
+from pydantic import ValidationError
 from tests.fixtures.synthetic_vendor import write_synthetic_vendor_dataset
 
 from ivs_forecast.config import AppConfig
 from ivs_forecast.data.clean import clean_contracts_day
 from ivs_forecast.data.collapse_nodes import build_surface_nodes
-from ivs_forecast.data.dfw import default_grid_definition, fit_dfw_surface, sample_dfw
 from ivs_forecast.data.discovery import (
     audit_vendor_corpus,
     inventory_raw_files,
@@ -21,19 +20,34 @@ from ivs_forecast.data.discovery import (
 )
 from ivs_forecast.data.parity_forward import estimate_forward_terms
 from ivs_forecast.data.schema import reconcile_schema
-from ivs_forecast.pipeline.forecast import evaluate_straddle_signal
+from ivs_forecast.data.time_to_settlement import (
+    settlement_timestamp_eastern,
+    snapshot_timestamp_eastern,
+    year_fraction_act365,
+)
+from ivs_forecast.pipeline.build_data import build_data_stage
 
 
-def _config() -> AppConfig:
+def _config(raw_root: str = "D:/Options Data", artifact_root: str = "./artifacts") -> AppConfig:
     return AppConfig.model_validate(
         {
-            "paths": {"raw_data_root": "D:/Options Data", "artifact_root": "./artifacts"},
+            "paths": {"raw_data_root": raw_root, "artifact_root": artifact_root},
             "study": {
                 "underlying_symbol": "^SPX",
+                "option_root": "SPX",
                 "start_date": "2020-01-02",
                 "end_date": "2020-12-31",
                 "forecast_horizon_days": 1,
+                "min_surface_nodes": 3,
+                "min_valid_expiries": 1,
             },
+            "split": {
+                "validation_size": 2,
+                "test_size": 2,
+                "min_train_size": 3,
+                "refit_frequency": 1,
+            },
+            "runtime": {"seed": 20260329, "overwrite": False, "run_id": "unit_run"},
         }
     )
 
@@ -66,74 +80,53 @@ def test_reconcile_schema_accepts_observed_1545() -> None:
     assert reconciliation.missing_required_columns == []
 
 
-def test_clean_forward_collapse_and_dfw() -> None:
-    quote_date = date(2020, 1, 2)
-    expiration = date(2020, 3, 2)
-    rows = []
-    for strike, sigma in [(90.0, 0.22), (100.0, 0.20), (110.0, 0.21)]:
-        call_mid = max(0.0, 100.0 - strike) + 5.0
-        put_mid = call_mid - (100.0 - strike)
-        for option_type, mid, delta in [("C", call_mid, 0.5), ("P", put_mid, -0.5)]:
-            rows.append(
-                {
-                    "underlying_symbol": "^SPX",
-                    "quote_date": quote_date,
-                    "root": "SPXW",
-                    "expiration": expiration,
-                    "strike": strike,
-                    "option_type": option_type,
-                    "bid_1545": mid - 0.1,
-                    "ask_1545": mid + 0.1,
-                    "active_underlying_price_1545": 100.0,
-                    "implied_volatility_1545": sigma,
-                    "delta_1545": delta,
-                    "vega_1545": 1.0,
-                    "trade_volume": 10,
-                    "open_interest": 100,
-                }
-            )
-    clean, _ = clean_contracts_day(pl.DataFrame(rows), _config())
-    forward_terms, _ = estimate_forward_terms(clean)
-    assert forward_terms.height == 1
-    nodes, quality = build_surface_nodes(clean, forward_terms, _config())
-    assert quality["modeling_valid"][0] is False or nodes.height >= 3
-    fit = fit_dfw_surface(
-        pl.DataFrame(
+def test_study_config_requires_option_root() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
             {
-                "quote_date": [quote_date] * 8,
-                "m": np.array([-0.25, -0.15, -0.05, 0.0, 0.05, 0.12, 0.18, 0.24]),
-                "tau": np.array([20, 35, 50, 65, 90, 120, 180, 240]) / 365.0,
-                "node_iv": np.array([0.24, 0.22, 0.205, 0.20, 0.202, 0.208, 0.215, 0.225]),
-                "node_vega": np.ones(8),
+                "paths": {"raw_data_root": "D:/Options Data", "artifact_root": "./artifacts"},
+                "study": {
+                    "underlying_symbol": "^SPX",
+                    "start_date": "2020-01-02",
+                    "end_date": "2020-12-31",
+                    "forecast_horizon_days": 1,
+                },
             }
         )
-    )
-    sampled = sample_dfw(fit.coefficients, default_grid_definition())
-    assert sampled.shape == (154,)
-    assert sampled.min() >= 0.01
 
 
-def test_forward_terms_keep_roots_separate_and_mixed_root_dates_fail_fast() -> None:
+def test_snapshot_and_settlement_timestamps_apply_spx_am_rules() -> None:
+    normal_snapshot = snapshot_timestamp_eastern(date(2020, 11, 27), is_early_close=False)
+    early_snapshot = snapshot_timestamp_eastern(date(2020, 11, 27), is_early_close=True)
+    settlement = settlement_timestamp_eastern(date(2020, 12, 18), "SPX")
+    assert normal_snapshot.hour == 15 and normal_snapshot.minute == 45
+    assert early_snapshot.hour == 12 and early_snapshot.minute == 45
+    assert settlement.hour == 9 and settlement.minute == 30
+    normal_tau = year_fraction_act365(normal_snapshot, settlement)
+    early_tau = year_fraction_act365(early_snapshot, settlement)
+    assert early_tau > normal_tau
+
+
+def test_clean_forward_and_collapse_are_root_explicit() -> None:
     quote_date = date(2020, 1, 2)
-    expiration = date(2020, 3, 2)
+    expiration = date(2020, 3, 20)
     rows = []
-    root_specs = {"SPX": (0.0, 0.23), "SPXW": (0.3, 0.19)}
-    for root, (premium_shift, sigma) in root_specs.items():
-        for strike in (90.0, 100.0, 110.0):
-            call_mid = max(0.0, 100.0 - strike) + 5.0 + premium_shift
-            put_mid = call_mid - (100.0 - strike)
+    for root_name, sigma_shift in [("SPX", 0.0), ("SPXW", 0.03)]:
+        for strike, sigma in [(2900.0, 0.22 + sigma_shift), (3000.0, 0.20 + sigma_shift), (3100.0, 0.21 + sigma_shift)]:
+            call_mid = max(0.0, 3000.0 - strike) + 40.0
+            put_mid = call_mid - (3000.0 - strike)
             for option_type, mid, delta in [("C", call_mid, 0.5), ("P", put_mid, -0.5)]:
                 rows.append(
                     {
                         "underlying_symbol": "^SPX",
                         "quote_date": quote_date,
-                        "root": root,
+                        "root": root_name,
                         "expiration": expiration,
                         "strike": strike,
                         "option_type": option_type,
                         "bid_1545": mid - 0.1,
                         "ask_1545": mid + 0.1,
-                        "active_underlying_price_1545": 100.0,
+                        "active_underlying_price_1545": 3000.0,
                         "implied_volatility_1545": sigma,
                         "delta_1545": delta,
                         "vega_1545": 1.0,
@@ -142,62 +135,30 @@ def test_forward_terms_keep_roots_separate_and_mixed_root_dates_fail_fast() -> N
                     }
                 )
     clean, _ = clean_contracts_day(pl.DataFrame(rows), _config())
+    assert clean["root"].unique().to_list() == ["SPX"]
     forward_terms, diagnostics = estimate_forward_terms(clean)
-    assert forward_terms.height == 2
-    assert set(forward_terms["root"].to_list()) == {"SPX", "SPXW"}
-    assert set(item.root for item in diagnostics) == {"SPX", "SPXW"}
-    with pytest.raises(ValueError, match="mixed option roots"):
-        build_surface_nodes(clean, forward_terms, _config())
+    assert forward_terms.height == 1
+    assert {item.root for item in diagnostics} == {"SPX"}
+    nodes, quality = build_surface_nodes(clean, forward_terms, _config())
+    assert nodes["option_root"].unique().to_list() == ["SPX"]
+    assert quality["root_count"][0] == 1
 
 
-class _UnusedReconstructor:
-    def predict(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
-        raise AssertionError("Cross-root straddles should be rejected before reconstruction.")
-
-
-def test_straddle_selection_rejects_cross_root_pairs() -> None:
-    expiration = date(2020, 2, 3)
-    current_contracts = pl.DataFrame(
-        {
-            "root": ["SPX", "SPXW"],
-            "expiration": [expiration, expiration],
-            "strike": [100.0, 100.0],
-            "option_type": ["C", "P"],
-            "mid_1545": [5.0, 4.8],
-            "spread_1545": [0.2, 0.2],
-            "tau": [30.0 / 365.0, 30.0 / 365.0],
-            "m": [0.0, 0.0],
-        }
-    )
-    target_contracts = current_contracts
-    rows = evaluate_straddle_signal(
-        model_name="rw_last",
-        quote_date=date(2020, 1, 2),
-        target_date=date(2020, 1, 3),
-        current_contracts=current_contracts,
-        target_contracts=target_contracts,
-        predicted_sampled_iv=np.zeros(154, dtype=np.float64),
-        current_sampled_surface=pl.DataFrame({"iv_g000": [0.2], "iv_g001": [0.2]}),
-        reconstructor=_UnusedReconstructor(),  # type: ignore[arg-type]
-        atm_grid_map={30: "g000", 91: "g001"},
-    )
-    assert rows == []
-
-
-def test_audit_vendor_corpus_succeeds_on_synthetic_data(tmp_path: Path) -> None:
+def test_audit_vendor_corpus_reports_root_coverage(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw"
-    write_synthetic_vendor_dataset(raw_root, n_dates=3)
+    write_synthetic_vendor_dataset(raw_root, n_dates=3, include_secondary_root=True)
     records = inventory_raw_files(raw_root, date(2020, 1, 2), date(2020, 1, 31))
     report = audit_vendor_corpus(
         records=records,
         underlying_symbol="^SPX",
+        option_root="SPX",
         start_date=date(2020, 1, 2),
         end_date=date(2020, 1, 31),
     )
     assert report["pass_status"] is True
-    assert report["raw_zip_count"] == 3
-    assert report["missing_required_columns"] == []
-    assert report["selected_underlying_caveats"]["active_underlying_price_1545_usable"] is True
+    assert report["selected_root_coverage"]["dates_with_option_root"] == 3
+    assert report["selected_root_coverage"]["dates_missing_option_root"] == []
+    assert report["selected_underlying_caveats"]["root_row_counts"]["SPX"] > 0
 
 
 def test_audit_vendor_corpus_rejects_quote_date_mismatch(tmp_path: Path) -> None:
@@ -215,6 +176,7 @@ def test_audit_vendor_corpus_rejects_quote_date_mismatch(tmp_path: Path) -> None
         audit_vendor_corpus(
             records=records,
             underlying_symbol="^SPX",
+            option_root="SPX",
             start_date=date(2020, 1, 2),
             end_date=date(2020, 1, 31),
         )
@@ -235,6 +197,16 @@ def test_audit_vendor_corpus_rejects_missing_calcs_columns(tmp_path: Path) -> No
         audit_vendor_corpus(
             records=records,
             underlying_symbol="^SPX",
+            option_root="SPX",
             start_date=date(2020, 1, 2),
             end_date=date(2020, 1, 31),
         )
+
+
+def test_build_data_fails_when_configured_root_is_missing(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    artifact_root = tmp_path / "artifacts"
+    write_synthetic_vendor_dataset(raw_root, n_dates=3, option_root="SPXW")
+    config = _config(str(raw_root), str(artifact_root))
+    with pytest.raises(ValueError, match="configured option_root was absent"):
+        build_data_stage(config)

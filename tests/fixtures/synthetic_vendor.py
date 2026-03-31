@@ -73,7 +73,12 @@ def _bs_values(
     return price, delta, gamma, vega
 
 
-def write_synthetic_vendor_dataset(root: Path, n_dates: int = 70) -> list[str]:
+def write_synthetic_vendor_dataset(
+    root: Path,
+    n_dates: int = 70,
+    option_root: str = "SPX",
+    include_secondary_root: bool = False,
+) -> list[str]:
     root.mkdir(parents=True, exist_ok=True)
     dates = _business_dates(np.datetime64("2020-01-02"), n_dates)
     rate = 0.01
@@ -83,58 +88,63 @@ def write_synthetic_vendor_dataset(root: Path, n_dates: int = 70) -> list[str]:
         quote_date = str(np_date.astype("datetime64[D]"))
         spot = 3000.0 + 2.5 * index + 40.0 * np.sin(index / 7.0)
         rows: list[list[str]] = []
-        for expiry_offset in expiry_days:
-            expiration = str((np_date + np.timedelta64(expiry_offset, "D")).astype("datetime64[D]"))
-            tau = expiry_offset / 365.0
-            for ratio in ratios:
-                strike = round(spot * ratio / 5.0) * 5.0
-                m = log(strike / (spot * exp(rate * tau)))
-                sigma = 0.14 + 0.03 * abs(m) + 0.015 * tau + 0.01 * np.sin(index / 5.0)
-                for option_type in ("C", "P"):
-                    price, delta, gamma, vega = _bs_values(
-                        spot, strike, tau, sigma, rate, option_type
-                    )
-                    spread = max(0.05, 0.01 * price)
-                    bid = max(0.01, price - 0.5 * spread)
-                    ask = price + 0.5 * spread
-                    rows.append(
-                        [
-                            "^SPX",
-                            quote_date,
-                            "SPXW",
-                            expiration,
-                            f"{strike:.3f}",
-                            option_type,
-                            "0.0000",
-                            "0.0000",
-                            "0.0000",
-                            "0.0000",
-                            "100",
-                            "10",
-                            f"{bid:.4f}",
-                            "10",
-                            f"{ask:.4f}",
-                            f"{spot - 0.1:.4f}",
-                            f"{spot + 0.1:.4f}",
-                            f"{spot:.4f}",
-                            f"{spot:.4f}",
-                            f"{sigma:.4f}",
-                            f"{delta:.4f}",
-                            f"{gamma:.6f}",
-                            "0.0000",
-                            f"{vega:.4f}",
-                            "0.0000",
-                            "10",
-                            f"{bid:.4f}",
-                            "10",
-                            f"{ask:.4f}",
-                            f"{spot - 0.1:.4f}",
-                            f"{spot + 0.1:.4f}",
-                            f"{price:.4f}",
-                            "1000",
-                            "",
-                        ]
-                    )
+        roots = [option_root]
+        if include_secondary_root:
+            roots.append("SPXW")
+        for root_name in roots:
+            root_shift = 0.0 if root_name == option_root else 0.012
+            for expiry_offset in expiry_days:
+                expiration = str((np_date + np.timedelta64(expiry_offset, "D")).astype("datetime64[D]"))
+                tau = expiry_offset / 365.0
+                for ratio in ratios:
+                    strike = round(spot * ratio / 5.0) * 5.0
+                    m = log(strike / (spot * exp(rate * tau)))
+                    sigma = 0.14 + root_shift + 0.03 * abs(m) + 0.015 * tau + 0.01 * np.sin(index / 5.0)
+                    for option_type in ("C", "P"):
+                        price, delta, gamma, vega = _bs_values(
+                            spot, strike, tau, sigma, rate, option_type
+                        )
+                        spread = max(0.05, 0.01 * price)
+                        bid = max(0.01, price - 0.5 * spread)
+                        ask = price + 0.5 * spread
+                        rows.append(
+                            [
+                                "^SPX",
+                                quote_date,
+                                root_name,
+                                expiration,
+                                f"{strike:.3f}",
+                                option_type,
+                                "0.0000",
+                                "0.0000",
+                                "0.0000",
+                                "0.0000",
+                                "100",
+                                "10",
+                                f"{bid:.4f}",
+                                "10",
+                                f"{ask:.4f}",
+                                f"{spot - 0.1:.4f}",
+                                f"{spot + 0.1:.4f}",
+                                f"{spot:.4f}",
+                                f"{spot:.4f}",
+                                f"{sigma:.4f}",
+                                f"{delta:.4f}",
+                                f"{gamma:.6f}",
+                                "0.0000",
+                                f"{vega:.4f}",
+                                "0.0000",
+                                "10",
+                                f"{bid:.4f}",
+                                "10",
+                                f"{ask:.4f}",
+                                f"{spot - 0.1:.4f}",
+                                f"{spot + 0.1:.4f}",
+                                f"{price:.4f}",
+                                "1000",
+                                "",
+                            ]
+                        )
         buffer = io.StringIO()
         writer = csv.writer(buffer, lineterminator="\n")
         writer.writerow(HEADER)

@@ -42,9 +42,17 @@ def stream_ingest_selected_underlying(
     written_paths: list[Path] = []
     underlying_key = underlying_to_key(config.study.underlying_symbol)
     for record in records:
-        frame = _ingest_single_zip(record.path).filter(
-            pl.col("underlying_symbol") == config.study.underlying_symbol
+        frame = (
+            _ingest_single_zip(record.path)
+            .filter(pl.col("underlying_symbol") == config.study.underlying_symbol)
+            .filter(pl.col("root") == config.study.option_root)
+            .with_columns(pl.lit(config.study.option_root).alias("option_root"))
         )
+        if frame.is_empty():
+            raise ValueError(
+                "The configured option_root was absent after ingestion for "
+                f"quote_date {record.trade_date.isoformat()}: {config.study.option_root}."
+            )
         year = record.trade_date.year
         day_path = subset_root / f"year={year}" / f"{record.trade_date.isoformat()}.parquet"
         day_path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,7 +62,11 @@ def stream_ingest_selected_underlying(
         raise ValueError(
             f"No rows found for {config.study.underlying_symbol} in the configured raw dataset."
         )
-    expected_prefix = subset_root.parent / f"underlying_key={underlying_key}"
+    expected_prefix = (
+        subset_root.parent.parent
+        / f"underlying_key={underlying_key}"
+        / f"option_root={config.study.option_root}"
+    )
     if subset_root != expected_prefix:
         raise ValueError("Internal subset path mismatch.")
     return written_paths

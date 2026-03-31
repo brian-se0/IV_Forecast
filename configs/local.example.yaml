@@ -4,6 +4,7 @@ paths:
 
 study:
   underlying_symbol: "^SPX"
+  option_root: "SPX"
   start_date: "2004-01-02"
   end_date: "2021-04-09"
   forecast_horizon_days: 1

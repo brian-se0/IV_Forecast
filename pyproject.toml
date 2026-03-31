@@ -18,7 +18,6 @@ dependencies = [
   "scipy",
   "torch",
   "typer",
-  "xgboost",
 ]
 
 [project.optional-dependencies]

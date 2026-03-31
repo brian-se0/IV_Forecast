@@ -4,14 +4,14 @@ Supported raw files:
 
 - `UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip`
 
-Required ZIP rules:
+Fatal ZIP conditions:
 
-- exactly one CSV member;
-- filename date must match `quote_date`;
-- unreadable ZIPs, missing CSVs, or multiple CSV members are fatal.
-- `verify-data` audits every supported ZIP in the configured date window rather than sampling only one file.
+- unreadable ZIP
+- zero CSV members
+- multiple CSV members
+- filename date does not match `quote_date`
 
-Canonical required columns for this repository:
+Required columns:
 
 - `underlying_symbol`
 - `quote_date`
@@ -46,21 +46,14 @@ Ignored for modeling:
 - `implied_underlying_price_1545`
 - `delivery_code`
 - quote-size columns
-- underlying bid/ask fields
+- underlying bid/ask columns beyond audit summaries
 
-Observed-vs-documented note:
+Contract notes:
 
-- local raw files and the vendor layout PDF use `*_1545`;
-- any `*_15453` references are treated as stale documentation aliases and not as required columns.
+- the implementation treats `root` as the option-class key
+- the validated v1 path filters to `option_root = "SPX"` before modeling artifacts are written
+- the `1545` suffix remains authoritative even on early-close days
+- zero IV rows are invalid surface observations
+- quote-only files are unsupported
 
-Root-handling note:
-
-- `root` is treated as the option-class key throughout forward estimation, node construction, and straddle pairing;
-- the v1 sampled-surface path supports only one homogeneous root per modeling date and fails fast on mixed-root dates.
-
-Audit caveats recorded by `verify-data`:
-
-- quote-only files are unsupported and do not satisfy the v1 contract;
-- missing `*_1545` calcs fields are fatal;
-- zero or missing underlying bid/ask rates are summarized for the selected underlying;
-- early-close dates are recorded from the in-repo curated half-day table as audit-only metadata.
+`verify-data` writes a machine-readable reconciliation report and includes per-date root coverage for the configured `underlying_symbol` and `option_root`.

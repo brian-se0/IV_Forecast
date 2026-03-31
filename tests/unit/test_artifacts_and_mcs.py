@@ -15,7 +15,7 @@ def test_build_stage_manifest_records_primary_artifacts(tmp_path) -> None:
         stage_name="unit_test",
         config_dump={"runtime": {"seed": 123}},
         global_seed=123,
-        device_by_model_family={"rw_last": "cpu"},
+        device_by_model_family={"state_last": "cpu"},
         primary_artifact_paths=[artifact_path],
         counts={"rows": 1},
         diagnostics={"status": "ok"},

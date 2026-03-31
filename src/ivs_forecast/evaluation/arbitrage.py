@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ivs_forecast.models.reconstructor import FittedReconstructor
+from ivs_forecast.data.ssvi import static_arb_certification
 
 
-def arbitrage_diagnostics(
-    reconstructor: FittedReconstructor,
-    sampled_surface_iv: np.ndarray,
-) -> dict[str, float]:
-    return reconstructor.arbitrage_diagnostics(sampled_surface_iv)
+def arbitrage_diagnostics(predicted_state: np.ndarray) -> dict[str, float | int | bool]:
+    return static_arb_certification(predicted_state)

@@ -85,6 +85,7 @@ def estimate_forward_terms(
                     {
                         "quote_date": quote_date,
                         "root": root,
+                        "option_root": root,
                         "expiration": expiration,
                         "discount_factor": float(discount_factor),
                         "forward_price": float(forward_price),

@@ -8,53 +8,22 @@ import numpy as np
 import polars as pl
 import torch
 
-from ivs_forecast.features.dataset import grid_ids, x_feature_columns, y_target_columns
+from ivs_forecast.data.partitioned import DatePartitionIndex
+from ivs_forecast.data.ssvi import maturity_knots_days
+from ivs_forecast.features.dataset import state_z_columns
+from ivs_forecast.features.scalars import scalar_feature_columns
 
 
-def x_curr_columns() -> list[str]:
-    return [f"x_curr_{grid_id}" for grid_id in grid_ids()]
+def theta_columns() -> list[str]:
+    return [f"theta_d{int(days):03d}" for days in maturity_knots_days()]
 
 
-def x_ma5_columns() -> list[str]:
-    return [f"x_ma5_{grid_id}" for grid_id in grid_ids()]
+def state_parameter_columns() -> list[str]:
+    return theta_columns() + ["rho", "eta", "lambda"]
 
 
-def x_ma22_columns() -> list[str]:
-    return [f"x_ma22_{grid_id}" for grid_id in grid_ids()]
-
-
-def scalar_feature_columns() -> list[str]:
-    return [
-        "underlying_logret_1",
-        "underlying_logret_5",
-        "underlying_logret_22",
-        "log1p_total_trade_volume",
-        "log1p_total_open_interest",
-        "median_rel_spread_1545",
-    ]
-
-
-def features_matrix(frame: pl.DataFrame) -> np.ndarray:
-    return frame.select(x_feature_columns()).to_numpy().astype(np.float32)
-
-
-def current_surface_matrix(frame: pl.DataFrame) -> np.ndarray:
-    return frame.select(x_curr_columns()).to_numpy().astype(np.float64)
-
-
-def target_matrix(frame: pl.DataFrame) -> np.ndarray:
-    return frame.select(y_target_columns()).to_numpy().astype(np.float64)
-
-
-def sequence_matrix(frame: pl.DataFrame) -> np.ndarray:
-    scalar = frame.select(scalar_feature_columns()).to_numpy().astype(np.float32)
-    ma22 = frame.select(x_ma22_columns()).to_numpy().astype(np.float32)
-    ma5 = frame.select(x_ma5_columns()).to_numpy().astype(np.float32)
-    curr = frame.select(x_curr_columns()).to_numpy().astype(np.float32)
-    step0 = np.concatenate([ma22, scalar], axis=1)
-    step1 = np.concatenate([ma5, scalar], axis=1)
-    step2 = np.concatenate([curr, scalar], axis=1)
-    return np.stack([step0, step1, step2], axis=1)
+def history_feature_columns() -> list[str]:
+    return state_z_columns() + scalar_feature_columns()
 
 
 def assert_cuda_available(stage_name: str) -> None:
@@ -62,21 +31,102 @@ def assert_cuda_available(stage_name: str) -> None:
         raise RuntimeError(f"CUDA is required for {stage_name}, but no CUDA device is available.")
 
 
-@dataclass
+@dataclass(frozen=True)
+class NormalizationStats:
+    mean: np.ndarray
+    std: np.ndarray
+
+    def to_dict(self) -> dict[str, list[float]]:
+        return {
+            "mean": self.mean.astype(np.float64).tolist(),
+            "std": self.std.astype(np.float64).tolist(),
+        }
+
+    def apply(self, array: np.ndarray) -> np.ndarray:
+        return (array - self.mean) / self.std
+
+
+@dataclass(frozen=True)
 class ModelArtifact:
     model_name: str
     params: dict[str, Any]
 
 
-class SampledSurfaceModel(ABC):
+@dataclass(frozen=True)
+class DailyStateStore:
+    frame: pl.DataFrame
+    latent_matrix: np.ndarray
+    parameter_matrix: np.ndarray
+    daily_feature_matrix: np.ndarray
+
+    @classmethod
+    def from_frame(cls, frame: pl.DataFrame) -> DailyStateStore:
+        ordered = frame.sort("quote_date")
+        return cls(
+            frame=ordered,
+            latent_matrix=ordered.select(state_z_columns()).to_numpy().astype(np.float64),
+            parameter_matrix=ordered.select(state_parameter_columns()).to_numpy().astype(np.float64),
+            daily_feature_matrix=ordered.select(history_feature_columns()).to_numpy().astype(np.float32),
+        )
+
+    def latent_by_indices(self, indices: list[int] | np.ndarray) -> np.ndarray:
+        return self.latent_matrix[np.asarray(indices, dtype=np.int64)]
+
+    def parameters_by_indices(self, indices: list[int] | np.ndarray) -> np.ndarray:
+        return self.parameter_matrix[np.asarray(indices, dtype=np.int64)]
+
+    def history_tensor(self, history_end_index: int, history_days: int) -> np.ndarray:
+        start_index = history_end_index - history_days + 1
+        if start_index < 0:
+            raise ValueError(
+                f"History window underflow: end_index={history_end_index}, history_days={history_days}."
+            )
+        return self.daily_feature_matrix[start_index : history_end_index + 1]
+
+
+def unique_history_indices(feature_rows: pl.DataFrame, history_days: int) -> np.ndarray:
+    indices: set[int] = set()
+    for row in feature_rows.select("history_end_index").iter_rows(named=True):
+        history_end = int(row["history_end_index"])
+        start_index = history_end - history_days + 1
+        if start_index < 0:
+            raise ValueError(
+                f"History window underflow while collecting normalization rows: {start_index}."
+            )
+        indices.update(range(start_index, history_end + 1))
+    return np.asarray(sorted(indices), dtype=np.int64)
+
+
+def fit_normalization(
+    feature_rows: pl.DataFrame,
+    state_store: DailyStateStore,
+    history_days: int,
+) -> NormalizationStats:
+    indices = unique_history_indices(feature_rows, history_days)
+    matrix = state_store.daily_feature_matrix[indices].astype(np.float64)
+    std = matrix.std(axis=0)
+    std[std < 1e-6] = 1.0
+    return NormalizationStats(mean=matrix.mean(axis=0), std=std)
+
+
+class SsviStateModel(ABC):
     model_name: str
 
     @abstractmethod
-    def fit(self, train_frame: pl.DataFrame) -> None:
+    def fit(
+        self,
+        train_rows: pl.DataFrame,
+        state_store: DailyStateStore,
+        surface_nodes_store: DatePartitionIndex | None = None,
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def predict(self, feature_frame: pl.DataFrame) -> np.ndarray:
+    def predict(
+        self,
+        feature_rows: pl.DataFrame,
+        state_store: DailyStateStore,
+    ) -> np.ndarray:
         raise NotImplementedError
 
     def artifact(self) -> ModelArtifact:

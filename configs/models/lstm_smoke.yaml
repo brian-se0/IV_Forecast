@@ -1,9 +1,0 @@
-search_space:
-  hidden_size: [64]
-  dropout: [0.0]
-  learning_rate: [0.001]
-  batch_size: [128]
-fixed:
-  layers: 2
-  max_epochs: 100
-  early_stopping_patience: 10

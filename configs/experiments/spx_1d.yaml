@@ -4,6 +4,7 @@ paths:
 
 study:
   underlying_symbol: "^SPX"
+  option_root: "SPX"
   start_date: "2004-01-02"
   end_date: "2021-04-09"
   forecast_horizon_days: 1
@@ -11,8 +12,3 @@ study:
 runtime:
   seed: 20260329
   overwrite: false
-
-models:
-  reconstructor_config: "configs/models/reconstructor.yaml"
-  xgboost_config: "configs/models/xgboost.yaml"
-  lstm_config: "configs/models/lstm.yaml"

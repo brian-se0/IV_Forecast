@@ -26,6 +26,7 @@ def build_surface_nodes(
     aggregated = (
         joined.group_by(["quote_date", "root", "expiration", "strike"])
         .agg(
+            pl.col("option_root").first().alias("option_root"),
             pl.col("tau").first().alias("tau"),
             pl.col("m").first().alias("m"),
             (
@@ -62,7 +63,7 @@ def build_surface_nodes(
     if mixed_root_dates:
         dates = ", ".join(item.isoformat() for item in mixed_root_dates[:5])
         raise ValueError(
-            "A single sampled surface cannot be built from mixed option roots on the same date. "
+            "A single root-explicit SSVI state cannot be built from mixed option roots on the same date. "
             f"Observed multiple roots for quote_date values including: {dates}"
         )
     valid_dates = date_quality.filter(pl.col("modeling_valid"))["quote_date"].to_list()

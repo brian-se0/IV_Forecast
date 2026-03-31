@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -28,7 +28,8 @@ class PathConfig(BaseModel):
 
 
 class StudyConfig(BaseModel):
-    underlying_symbol: str = "^SPX"
+    underlying_symbol: Literal["^SPX"] = "^SPX"
+    option_root: Literal["SPX"]
     start_date: date
     end_date: date
     forecast_horizon_days: int = 1
@@ -43,8 +44,6 @@ class StudyConfig(BaseModel):
             raise ValueError("Only 1-day-ahead forecasting is supported in v1.")
         if self.start_date >= self.end_date:
             raise ValueError("study.start_date must be earlier than study.end_date.")
-        if self.underlying_symbol != "^SPX":
-            raise ValueError("Only ^SPX is supported in the validated v1 workflow.")
         return self
 
 
@@ -66,23 +65,11 @@ class RuntimeConfig(BaseModel):
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-class ModelPathConfig(BaseModel):
-    reconstructor_config: Path = Path("configs/models/reconstructor.yaml")
-    xgboost_config: Path = Path("configs/models/xgboost.yaml")
-    lstm_config: Path = Path("configs/models/lstm.yaml")
-
-    @field_validator("*", mode="before")
-    @classmethod
-    def _coerce_paths(cls, value: str | Path) -> Path:
-        return Path(value)
-
-
 class AppConfig(BaseModel):
     paths: PathConfig
     study: StudyConfig
     split: SplitConfig = Field(default_factory=SplitConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
-    models: ModelPathConfig = Field(default_factory=ModelPathConfig)
 
     def model_config_dump(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -94,7 +81,7 @@ class AppConfig(BaseModel):
     @property
     def subset_root(self) -> Path:
         key = underlying_to_key(self.study.underlying_symbol)
-        return self.run_root / "subset" / f"underlying_key={key}"
+        return self.run_root / "subset" / f"underlying_key={key}" / f"option_root={self.study.option_root}"
 
 
 def load_yaml(path: Path) -> dict[str, Any]:

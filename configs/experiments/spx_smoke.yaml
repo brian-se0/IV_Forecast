@@ -4,6 +4,7 @@ paths:
 
 study:
   underlying_symbol: "^SPX"
+  option_root: "SPX"
   start_date: "2004-01-02"
   end_date: "2008-03-31"
   forecast_horizon_days: 1
@@ -17,8 +18,3 @@ split:
 runtime:
   seed: 20260329
   overwrite: false
-
-models:
-  reconstructor_config: "configs/models/reconstructor_smoke.yaml"
-  xgboost_config: "configs/models/xgboost_smoke.yaml"
-  lstm_config: "configs/models/lstm_smoke.yaml"

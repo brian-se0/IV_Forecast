@@ -153,7 +153,11 @@ def _null_rate_summary(values: list[float]) -> dict[str, float]:
     }
 
 
-def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) -> dict[str, Any]:
+def _selected_underlying_caveats(
+    frame: pl.DataFrame,
+    underlying_symbol: str,
+    option_root: str,
+) -> dict[str, Any]:
     if "underlying_symbol" not in frame.columns:
         return {
             "selected_underlying_rows": 0,
@@ -163,6 +167,9 @@ def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) ->
             "root_row_counts": {},
             "mixed_root_date_count": 0,
             "mixed_root_dates": [],
+            "selected_option_root_rows": 0,
+            "selected_option_root_present": False,
+            "root_counts_by_date": [],
         }
     subset = frame.filter(pl.col("underlying_symbol") == underlying_symbol)
     if subset.is_empty():
@@ -174,6 +181,9 @@ def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) ->
             "root_row_counts": {},
             "mixed_root_date_count": 0,
             "mixed_root_dates": [],
+            "selected_option_root_rows": 0,
+            "selected_option_root_present": False,
+            "root_counts_by_date": [],
         }
     if {"underlying_bid_1545", "underlying_ask_1545"}.issubset(subset.columns):
         zero_or_missing = subset.select(
@@ -213,6 +223,21 @@ def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) ->
     mixed_root_dates = [
         value.isoformat() for value in mixed_root_dates_frame["quote_date"].to_list()
     ]
+    root_counts_by_date = []
+    for quote_date, partition in subset.partition_by("quote_date", as_dict=True).items():
+        normalized_date = quote_date[0] if isinstance(quote_date, tuple) else quote_date
+        root_counts = {
+            str(row["root"]): int(row["row_count"])
+            for row in partition.group_by("root").len(name="row_count").sort("root").iter_rows(named=True)
+        }
+        root_counts_by_date.append(
+            {
+                "quote_date": normalized_date.isoformat(),
+                "root_counts": root_counts,
+                "selected_option_root_rows": int(root_counts.get(option_root, 0)),
+                "selected_option_root_present": option_root in root_counts,
+            }
+        )
     return {
         "selected_underlying_rows": subset.height,
         "zero_or_missing_underlying_bid_ask_rows": int(zero_or_missing),
@@ -221,12 +246,16 @@ def _selected_underlying_caveats(frame: pl.DataFrame, underlying_symbol: str) ->
         "root_row_counts": root_row_counts,
         "mixed_root_date_count": mixed_root_dates_frame.height,
         "mixed_root_dates": mixed_root_dates,
+        "selected_option_root_rows": int(root_row_counts.get(option_root, 0)),
+        "selected_option_root_present": option_root in root_row_counts,
+        "root_counts_by_date": sorted(root_counts_by_date, key=lambda item: item["quote_date"]),
     }
 
 
 def audit_vendor_corpus(
     records: list[RawZipRecord],
     underlying_symbol: str,
+    option_root: str,
     start_date: date,
     end_date: date,
 ) -> dict[str, Any]:
@@ -256,6 +285,7 @@ def audit_vendor_corpus(
     root_row_counts_total: Counter[str] = Counter()
     mixed_root_dates: set[str] = set()
     file_reports: list[dict[str, Any]] = []
+    root_coverage_by_date: list[dict[str, Any]] = []
 
     for record in records:
         frame = _read_zip_csv(record.path)
@@ -292,12 +322,13 @@ def audit_vendor_corpus(
         for column, dtype in frame.schema.items():
             dtype_counts[column][str(dtype)] += 1
             null_rates[column].append(frame[column].null_count() / max(frame.height, 1))
-        caveats = _selected_underlying_caveats(frame, underlying_symbol)
+        caveats = _selected_underlying_caveats(frame, underlying_symbol, option_root)
         selected_underlying_rows += int(caveats["selected_underlying_rows"])
         zero_or_missing_underlying_bid_ask_rows += int(caveats["zero_or_missing_underlying_bid_ask_rows"])
         positive_active_underlying_price_rows += int(caveats["positive_active_underlying_price_rows"])
         root_row_counts_total.update(caveats["root_row_counts"])
         mixed_root_dates.update(caveats["mixed_root_dates"])
+        root_coverage_by_date.extend(caveats["root_counts_by_date"])
         file_reports.append(
             {
                 "file_path": str(record.path),
@@ -346,6 +377,7 @@ def audit_vendor_corpus(
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "underlying_symbol": underlying_symbol,
+            "option_root": option_root,
         },
         "raw_zip_count": len(records),
         "documented_columns": list(DOCUMENTED_COLUMNS),
@@ -370,6 +402,7 @@ def audit_vendor_corpus(
         },
         "selected_underlying_caveats": {
             "underlying_symbol": underlying_symbol,
+            "option_root": option_root,
             "selected_underlying_rows": selected_underlying_rows,
             "zero_or_missing_underlying_bid_ask_rows": zero_or_missing_underlying_bid_ask_rows,
             "zero_or_missing_underlying_bid_ask_fraction": float(zero_or_missing_fraction),
@@ -380,6 +413,17 @@ def audit_vendor_corpus(
             "mixed_root_date_count": len(mixed_root_dates),
             "mixed_root_dates": sorted(mixed_root_dates),
             "active_underlying_price_1545_usable": active_price_positive_fraction == 1.0,
+        },
+        "selected_root_coverage": {
+            "option_root": option_root,
+            "dates_in_window": len(records),
+            "dates_with_option_root": sum(
+                1 for item in root_coverage_by_date if item["selected_option_root_present"]
+            ),
+            "dates_missing_option_root": [
+                item["quote_date"] for item in root_coverage_by_date if not item["selected_option_root_present"]
+            ],
+            "root_counts_by_date": sorted(root_coverage_by_date, key=lambda item: item["quote_date"]),
         },
         "early_close_audit": {
             "calendar_name": "curated_us_options_half_days_v1",
@@ -395,6 +439,7 @@ def audit_vendor_corpus(
             "The audit is corpus-wide across the configured date window.",
             "Calcs-required semantics are enforced via the required 15:45 vendor fields.",
             "Early-close dates are audit-only and do not alter the 1545 column contract.",
+            "Option-root coverage is reported by date before any modeling artifacts are built.",
         ],
         "files": file_reports,
     }
@@ -405,7 +450,7 @@ def data_audit_markdown(report: dict[str, Any]) -> str:
     window = report["study_window"]
     lines.append(
         f"Study window: `{window['start_date']}` to `{window['end_date']}` for "
-        f"`{window['underlying_symbol']}`."
+        f"`{window['underlying_symbol']}` with option root `{window['option_root']}`."
     )
     lines.append(f"Audited raw ZIP count: `{report['raw_zip_count']}`.")
     lines.append("")
@@ -438,6 +483,18 @@ def data_audit_markdown(report: dict[str, Any]) -> str:
         "Active underlying price usable: "
         f"`{caveats['active_underlying_price_1545_usable']}`."
     )
+    lines.append("")
+    lines.append("## Root Coverage")
+    coverage = report["selected_root_coverage"]
+    lines.append(
+        f"Dates with configured root `{coverage['option_root']}`: "
+        f"`{coverage['dates_with_option_root']}` / `{coverage['dates_in_window']}`."
+    )
+    if coverage["dates_missing_option_root"]:
+        lines.append(
+            "Dates missing configured root: "
+            f"`{', '.join(coverage['dates_missing_option_root'])}`."
+        )
     lines.append("")
     lines.append("## Early Closes")
     early_close = report["early_close_audit"]

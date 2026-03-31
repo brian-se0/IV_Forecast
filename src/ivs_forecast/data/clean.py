@@ -7,6 +7,12 @@ from pathlib import Path
 import polars as pl
 
 from ivs_forecast.config import AppConfig
+from ivs_forecast.data.early_closes import CURATED_EARLY_CLOSE_DATES
+from ivs_forecast.data.time_to_settlement import (
+    settlement_timestamp_eastern,
+    snapshot_timestamp_eastern,
+    year_fraction_act365,
+)
 
 CONTRACT_KEY = (
     "quote_date",
@@ -50,8 +56,21 @@ def _validate_duplicates(frame: pl.DataFrame) -> tuple[pl.DataFrame, DuplicateSu
 def clean_contracts_day(
     frame: pl.DataFrame, config: AppConfig
 ) -> tuple[pl.DataFrame, DuplicateSummary]:
+    filtered_to_contract = frame.filter(pl.col("underlying_symbol") == config.study.underlying_symbol).filter(
+        pl.col("root") == config.study.option_root
+    )
+    if filtered_to_contract.is_empty():
+        return _validate_duplicates(filtered_to_contract)
+    quote_dates = filtered_to_contract["quote_date"].unique().to_list()
+    if len(quote_dates) != 1:
+        raise ValueError(
+            "Each daily contract frame must contain exactly one quote_date before cleaning."
+        )
+    quote_date = quote_dates[0]
+    is_early_close = quote_date in set(CURATED_EARLY_CLOSE_DATES)
+    snapshot_ts = snapshot_timestamp_eastern(quote_date, is_early_close)
     filtered = (
-        frame.with_columns(
+        filtered_to_contract.with_columns(
             (
                 pl.col("expiration").cast(pl.Date).cast(pl.Int32)
                 - pl.col("quote_date").cast(pl.Date).cast(pl.Int32)
@@ -69,6 +88,8 @@ def clean_contracts_day(
         .filter(pl.col("vega_1545") > 0)
         .filter(pl.col("active_underlying_price_1545") > 0)
         .with_columns(
+            pl.lit(config.study.option_root).alias("option_root"),
+            pl.lit(is_early_close).alias("is_early_close"),
             (0.5 * (pl.col("bid_1545") + pl.col("ask_1545"))).alias("mid_1545"),
             (pl.col("ask_1545") - pl.col("bid_1545")).alias("spread_1545"),
         )
@@ -76,7 +97,15 @@ def clean_contracts_day(
             (pl.col("spread_1545") / pl.max_horizontal(pl.col("mid_1545"), pl.lit(1e-6))).alias(
                 "rel_spread_1545"
             ),
-            (pl.col("dte_days") / pl.lit(365.0)).alias("tau"),
+            pl.col("expiration")
+            .map_elements(
+                lambda expiration: year_fraction_act365(
+                    snapshot_ts,
+                    settlement_timestamp_eastern(expiration, config.study.option_root),
+                ),
+                return_dtype=pl.Float64,
+            )
+            .alias("tau"),
         )
     )
     return _validate_duplicates(filtered)

@@ -14,11 +14,11 @@ runner = CliRunner()
 
 
 def _write_config(tmp_path: Path, raw_root: Path, artifact_root: Path, run_id: str) -> Path:
-    repo_root = Path(__file__).resolve().parents[2]
     config = {
         "paths": {"raw_data_root": str(raw_root), "artifact_root": str(artifact_root)},
         "study": {
             "underlying_symbol": "^SPX",
+            "option_root": "SPX",
             "start_date": "2020-01-02",
             "end_date": "2020-04-30",
             "forecast_horizon_days": 1,
@@ -30,11 +30,6 @@ def _write_config(tmp_path: Path, raw_root: Path, artifact_root: Path, run_id: s
             "refit_frequency": 5,
         },
         "runtime": {"seed": 20260329, "overwrite": False, "run_id": run_id},
-        "models": {
-            "reconstructor_config": str(repo_root / "configs/models/reconstructor_smoke.yaml"),
-            "xgboost_config": str(repo_root / "configs/models/xgboost_smoke.yaml"),
-            "lstm_config": str(repo_root / "configs/models/lstm_smoke.yaml"),
-        },
     }
     config_path = tmp_path / f"{run_id}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
@@ -72,11 +67,15 @@ def test_cli_build_data_on_synthetic_dataset(tmp_path: Path) -> None:
         "forward_terms.parquet",
         "surface_nodes_index.parquet",
         "surface_date_quality.parquet",
-        "grid_definition.parquet",
-        "sampled_surface_wide.parquet",
+        "ssvi_state.parquet",
+        "ssvi_fit_diagnostics.parquet",
+        "ssvi_certification.parquet",
         "features_targets.parquet",
     ):
         assert (run_dir / name).exists(), name
+    legacy_surface_name = "_".join(["sampled", "surface", "wide.parquet"])
+    assert not (run_dir / legacy_surface_name).exists()
+    assert not (run_dir / "grid_definition.parquet").exists()
     assert (run_dir / "clean_contracts").is_dir()
     assert (run_dir / "surface_nodes").is_dir()
     assert list((run_dir / "clean_contracts").glob("year=*/*.parquet"))
@@ -104,12 +103,13 @@ def test_cli_run_and_report_on_synthetic_dataset(tmp_path: Path) -> None:
         "forward_terms.parquet",
         "surface_nodes_index.parquet",
         "surface_date_quality.parquet",
-        "sampled_surface_wide.parquet",
+        "ssvi_state.parquet",
+        "ssvi_fit_diagnostics.parquet",
+        "ssvi_certification.parquet",
         "features_targets.parquet",
         "split_manifest.json",
-        "reconstructor_model.pt",
         "loss_panel.parquet",
-        "arbitrage_panel.parquet",
+        "forecast_ssvi_certification.parquet",
         "pricing_utility.parquet",
         "hedged_pnl_utility.parquet",
         "straddle_signal_utility.parquet",
@@ -119,8 +119,11 @@ def test_cli_run_and_report_on_synthetic_dataset(tmp_path: Path) -> None:
     ]
     for name in mandatory:
         assert (run_dir / name).exists(), name
-    assert (run_dir / "clean_contracts").is_dir()
-    assert (run_dir / "surface_nodes").is_dir()
+    for model_name in ("state_last", "state_var1", "ssvi_tcn_direct"):
+        model_root = run_dir / "models" / model_name
+        assert (model_root / "forecast_ssvi_state.parquet").exists()
+        assert (model_root / "forecast_node_panel.parquet").exists()
+        assert (model_root / "forecast_contract_panel.parquet").exists()
     for name in (
         "verify_data_manifest.json",
         "build_data_manifest.json",

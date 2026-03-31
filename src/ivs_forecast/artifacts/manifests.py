@@ -57,7 +57,6 @@ RUNTIME_PACKAGE_NAMES: tuple[str, ...] = (
     "scipy",
     "torch",
     "typer",
-    "xgboost",
 )
 
 

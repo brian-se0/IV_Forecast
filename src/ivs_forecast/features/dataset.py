@@ -1,98 +1,67 @@
 from __future__ import annotations
 
-import math
-
 import polars as pl
 
-from ivs_forecast.features.scalars import log_return
-from ivs_forecast.features.windows import trailing_mean
+from ivs_forecast.features.scalars import scalar_feature_columns
 
-GRID_SIZE = 154
-
-
-def grid_ids() -> list[str]:
-    return [f"g{index:03d}" for index in range(GRID_SIZE)]
+STATE_Z_DIM = 14
 
 
-def _validated_sampled_surfaces(sampled_surfaces: pl.DataFrame) -> pl.DataFrame:
-    if sampled_surfaces.is_empty():
-        raise ValueError("Sampled surfaces are empty.")
-    if sampled_surfaces["quote_date"].null_count() > 0:
-        raise ValueError("Sampled surfaces must not contain null quote_date values.")
-    quote_dates = sampled_surfaces["quote_date"].to_list()
+def state_z_columns() -> list[str]:
+    return [f"state_z_{index:03d}" for index in range(STATE_Z_DIM)]
+
+
+def origin_scalar_feature_columns() -> list[str]:
+    return scalar_feature_columns()
+
+
+def _validated_ssvi_state_panel(ssvi_state: pl.DataFrame) -> pl.DataFrame:
+    if ssvi_state.is_empty():
+        raise ValueError("SSVI state panel is empty.")
+    required = {"quote_date", "option_root", "state_row_index", *state_z_columns(), *scalar_feature_columns()}
+    missing = sorted(required - set(ssvi_state.columns))
+    if missing:
+        raise ValueError(f"SSVI state panel is missing required columns: {missing}")
+    ordered = ssvi_state.sort("quote_date")
+    quote_dates = ordered["quote_date"].to_list()
     if len(set(quote_dates)) != len(quote_dates):
-        raise ValueError("Sampled surfaces must not contain duplicate quote_date rows.")
+        raise ValueError("SSVI state panel must not contain duplicate quote_date rows.")
     if quote_dates != sorted(quote_dates):
-        raise ValueError("Sampled surfaces must be strictly ordered by quote_date.")
-    return sampled_surfaces
+        raise ValueError("SSVI state panel must be strictly ordered by quote_date.")
+    row_indices = ordered["state_row_index"].to_list()
+    if row_indices != list(range(len(row_indices))):
+        raise ValueError("state_row_index must be contiguous and zero-based.")
+    return ordered
 
 
 def assert_feature_target_separation() -> None:
-    overlap = sorted(set(x_feature_columns()) & set(y_target_columns()))
+    overlap = sorted(set(origin_scalar_feature_columns()) & {"target_state_row_index"})
     if overlap:
         raise ValueError(f"Feature/target leakage detected in shared column names: {overlap}")
 
 
-def build_features_targets(sampled_surfaces: pl.DataFrame) -> pl.DataFrame:
-    ordered = _validated_sampled_surfaces(sampled_surfaces)
-    ids = grid_ids()
-    logiv_columns = [f"logiv_{grid_id}" for grid_id in ids]
-    logiv_matrix = ordered.select(logiv_columns).to_numpy()
-    current = logiv_matrix
-    ma5 = trailing_mean(logiv_matrix, 5)
-    ma22 = trailing_mean(logiv_matrix, 22)
-    underlying_prices = ordered["active_underlying_price_1545"].to_numpy()
-    underlying_logret_1 = log_return(underlying_prices, 1)
-    underlying_logret_5 = log_return(underlying_prices, 5)
-    underlying_logret_22 = log_return(underlying_prices, 22)
-    volume = ordered["total_trade_volume"].to_numpy()
-    oi = ordered["total_open_interest"].to_numpy()
-    spread = ordered["median_rel_spread_1545"].to_numpy()
+def build_features_targets(ssvi_state: pl.DataFrame, minimum_history_days: int = 22) -> pl.DataFrame:
+    ordered = _validated_ssvi_state_panel(ssvi_state)
     rows: list[dict[str, object]] = []
-    for index in range(22, ordered.height - 1):
+    for origin_index in range(minimum_history_days - 1, ordered.height - 1):
+        target_index = origin_index + 1
         row: dict[str, object] = {
-            "quote_date": ordered["quote_date"][index],
-            "target_date": ordered["quote_date"][index + 1],
-            "underlying_logret_1": float(underlying_logret_1[index]),
-            "underlying_logret_5": float(underlying_logret_5[index]),
-            "underlying_logret_22": float(underlying_logret_22[index]),
-            "log1p_total_trade_volume": float(math.log1p(volume[index])),
-            "log1p_total_open_interest": float(math.log1p(oi[index])),
-            "median_rel_spread_1545": float(spread[index]),
+            "quote_date": ordered["quote_date"][origin_index],
+            "target_date": ordered["quote_date"][target_index],
+            "option_root": ordered["option_root"][origin_index],
+            "history_start_index": origin_index - minimum_history_days + 1,
+            "history_end_index": origin_index,
+            "surface_state_row_index": int(ordered["state_row_index"][origin_index]),
+            "target_state_row_index": int(ordered["state_row_index"][target_index]),
         }
-        for grid_index, grid_id in enumerate(ids):
-            row[f"x_curr_{grid_id}"] = float(current[index, grid_index])
-            row[f"x_ma5_{grid_id}"] = float(ma5[index, grid_index])
-            row[f"x_ma22_{grid_id}"] = float(ma22[index, grid_index])
-            row[f"y_{grid_id}"] = float(logiv_matrix[index + 1, grid_index])
+        for column in origin_scalar_feature_columns():
+            row[column] = float(ordered[column][origin_index])
         rows.append(row)
     if not rows:
-        raise ValueError("Too few valid sampled-surface dates to build features/targets.")
+        raise ValueError("Too few valid SSVI dates to build features_targets.parquet.")
     assert_feature_target_separation()
-    features = pl.DataFrame(rows)
-    expected_next_dates = ordered["quote_date"][23:].to_list()
+    features = pl.DataFrame(rows).sort("quote_date")
+    expected_next_dates = ordered["quote_date"][minimum_history_days:].to_list()
     if features["target_date"].to_list() != expected_next_dates:
         raise ValueError("Each target_date must equal the next available modeling date.")
     return features
-
-
-def x_feature_columns() -> list[str]:
-    ids = grid_ids()
-    scalar_columns = [
-        "underlying_logret_1",
-        "underlying_logret_5",
-        "underlying_logret_22",
-        "log1p_total_trade_volume",
-        "log1p_total_open_interest",
-        "median_rel_spread_1545",
-    ]
-    return (
-        [f"x_curr_{grid_id}" for grid_id in ids]
-        + [f"x_ma5_{grid_id}" for grid_id in ids]
-        + [f"x_ma22_{grid_id}" for grid_id in ids]
-        + scalar_columns
-    )
-
-
-def y_target_columns() -> list[str]:
-    return [f"y_{grid_id}" for grid_id in grid_ids()]

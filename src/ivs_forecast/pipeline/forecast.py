@@ -7,18 +7,26 @@ import numpy as np
 import polars as pl
 
 from ivs_forecast.data.partitioned import DatePartitionIndex
+from ivs_forecast.data.ssvi import (
+    raw_to_constrained_params,
+    ssvi_implied_vol,
+    static_arb_certification,
+)
 from ivs_forecast.evaluation.hedged_pnl import hedged_pnl_utility
 from ivs_forecast.evaluation.metrics import compute_metrics
 from ivs_forecast.evaluation.pricing_mark import black_scholes_price, pricing_utility
-from ivs_forecast.evaluation.straddle_signal import straddle_utility
-from ivs_forecast.models.reconstructor import FittedReconstructor
+from ivs_forecast.features.dataset import state_z_columns
+from ivs_forecast.models.base import state_parameter_columns
 
 
 def contracts_with_forward(
-    clean_contracts: pl.DataFrame, forward_terms: pl.DataFrame
+    clean_contracts: pl.DataFrame,
+    forward_terms: pl.DataFrame,
 ) -> pl.DataFrame:
     joined = clean_contracts.join(
-        forward_terms, on=["quote_date", "root", "expiration"], how="inner"
+        forward_terms,
+        on=["quote_date", "root", "option_root", "expiration"],
+        how="inner",
     )
     return joined.with_columns(
         pl.struct(["strike", "forward_price"])
@@ -39,74 +47,118 @@ def load_contracts_with_forward_for_date(
     forward_for_date = forward_terms.filter(pl.col("quote_date") == quote_date)
     if forward_for_date.is_empty():
         raise ValueError(
-            f"Forward terms are missing for quote_date {quote_date}; the date-partitioned contract "
-            "evaluation path cannot proceed."
+            f"Forward terms are missing for quote_date {quote_date}; contract evaluation cannot proceed."
         )
     contracts = contracts_with_forward(clean_contracts, forward_for_date)
     if contracts.is_empty():
-        raise ValueError(
-            f"No forward-enriched contracts were available for quote_date {quote_date}."
-        )
+        raise ValueError(f"No forward-enriched contracts were available for quote_date {quote_date}.")
     return contracts
+
+
+def _parameter_dict(params: np.ndarray) -> dict[str, float]:
+    values = params.astype(np.float64)
+    return {
+        **{
+            column: float(values[index])
+            for index, column in enumerate(state_parameter_columns())
+        }
+    }
+
+
+def forecast_state_record(
+    model_name: str,
+    quote_date: object,
+    target_date: object,
+    option_root: str,
+    predicted_state_z: np.ndarray,
+) -> dict[str, Any]:
+    constrained = np.asarray(raw_to_constrained_params(predicted_state_z), dtype=np.float64)
+    record: dict[str, Any] = {
+        "model_name": model_name,
+        "forecast_origin": quote_date,
+        "target_date": target_date,
+        "option_root": option_root,
+    }
+    for index, column in enumerate(state_z_columns()):
+        record[column] = float(predicted_state_z[index])
+    record.update(_parameter_dict(constrained))
+    return record
 
 
 def evaluate_node_forecast(
     model_name: str,
     quote_date: object,
     target_date: object,
-    predicted_sampled_iv: np.ndarray,
-    reconstructor: FittedReconstructor,
+    predicted_state_z: np.ndarray,
     target_nodes: pl.DataFrame,
 ) -> tuple[dict[str, Any], dict[str, Any], pl.DataFrame]:
-    predicted_node_iv = reconstructor.predict(
-        predicted_sampled_iv,
-        target_nodes["m"].to_numpy().astype(np.float64),
-        target_nodes["tau"].to_numpy().astype(np.float64),
+    constrained = np.asarray(raw_to_constrained_params(predicted_state_z), dtype=np.float64)
+    predicted_node_iv = np.asarray(
+        ssvi_implied_vol(
+            target_nodes["m"].to_numpy().astype(np.float64),
+            target_nodes["tau"].to_numpy().astype(np.float64),
+            constrained,
+        ),
+        dtype=np.float64,
     )
     metrics = compute_metrics(
         target_nodes["node_iv"].to_numpy().astype(np.float64),
         predicted_node_iv,
         target_nodes["node_vega"].to_numpy().astype(np.float64),
     )
+    certification = static_arb_certification(constrained)
+    option_root = str(target_nodes["option_root"][0])
     node_predictions = target_nodes.select(
-        "quote_date", "root", "expiration", "strike", "m", "tau", "node_iv", "node_vega"
+        "quote_date",
+        "option_root",
+        "root",
+        "expiration",
+        "strike",
+        "m",
+        "tau",
+        "node_iv",
+        "node_vega",
     ).with_columns(
         pl.lit(model_name).alias("model_name"),
         pl.lit(quote_date).alias("forecast_origin"),
         pl.lit(target_date).alias("target_date"),
         pl.Series("predicted_iv", predicted_node_iv),
     )
-    arbitrage = reconstructor.arbitrage_diagnostics(predicted_sampled_iv)
     loss_row = {
         "model_name": model_name,
         "forecast_origin": quote_date,
         "target_date": target_date,
+        "option_root": option_root,
         "rmse_iv": metrics.rmse_iv,
         "mae_iv": metrics.mae_iv,
         "mape_iv_clipped": metrics.mape_iv_clipped,
         "vega_rmse_iv": metrics.vega_rmse_iv,
     }
-    arbitrage_row = {
+    certification_row = {
         "model_name": model_name,
         "forecast_origin": quote_date,
         "target_date": target_date,
-        **arbitrage,
+        "option_root": option_root,
+        **certification,
     }
-    return loss_row, arbitrage_row, node_predictions
+    return loss_row, certification_row, node_predictions
 
 
 def evaluate_pricing_utility(
     model_name: str,
     quote_date: object,
     target_date: object,
-    predicted_sampled_iv: np.ndarray,
-    reconstructor: FittedReconstructor,
+    predicted_state_z: np.ndarray,
     target_contracts: pl.DataFrame,
 ) -> tuple[dict[str, Any], pl.DataFrame]:
-    predicted_iv = reconstructor.predict(
-        predicted_sampled_iv,
-        target_contracts["m"].to_numpy().astype(np.float64),
-        target_contracts["tau"].to_numpy().astype(np.float64),
+    constrained = np.asarray(raw_to_constrained_params(predicted_state_z), dtype=np.float64)
+    predicted_iv = np.asarray(
+        ssvi_implied_vol(
+            target_contracts["m"].to_numpy().astype(np.float64),
+            target_contracts["tau"].to_numpy().astype(np.float64),
+            constrained,
+        ),
+        dtype=np.float64,
     )
     predicted_price = black_scholes_price(
         target_contracts["forward_price"].to_numpy().astype(np.float64),
@@ -133,6 +185,7 @@ def evaluate_pricing_utility(
         "model_name": model_name,
         "forecast_origin": quote_date,
         "target_date": target_date,
+        "option_root": str(target_contracts["option_root"][0]),
         **utility,
     }
     return row, priced_contracts
@@ -176,7 +229,7 @@ def evaluate_hedged_pnl_utility(
     current_contracts: pl.DataFrame,
     target_priced_contracts: pl.DataFrame,
 ) -> list[dict[str, Any]]:
-    join_keys = ["root", "expiration", "strike", "option_type"]
+    join_keys = ["option_root", "root", "expiration", "strike", "option_type"]
     joined = current_contracts.join(
         target_priced_contracts.select(
             join_keys + ["mid_1545", "active_underlying_price_1545", "predicted_price"]
@@ -200,6 +253,7 @@ def evaluate_hedged_pnl_utility(
             "model_name": model_name,
             "forecast_origin": quote_date,
             "target_date": target_date,
+            "option_root": str(current_contracts["option_root"][0]),
             "bucket": "all",
             **overall,
         }
@@ -227,6 +281,7 @@ def evaluate_hedged_pnl_utility(
                 "model_name": model_name,
                 "forecast_origin": quote_date,
                 "target_date": target_date,
+                "option_root": str(current_contracts["option_root"][0]),
                 "bucket": bucket_name,
                 **utility,
             }
@@ -240,24 +295,14 @@ def evaluate_straddle_signal(
     target_date: object,
     current_contracts: pl.DataFrame,
     target_contracts: pl.DataFrame,
-    predicted_sampled_iv: np.ndarray,
-    current_sampled_surface: pl.DataFrame,
-    reconstructor: FittedReconstructor,
-    atm_grid_map: dict[int, str],
+    current_state_params: np.ndarray,
+    predicted_state_z: np.ndarray,
 ) -> list[dict[str, Any]]:
-    matched = current_contracts.join(
-        current_contracts.filter(pl.col("option_type") == "P").select(
-            ["root", "expiration", "strike"]
-        ),
-        on=["root", "expiration", "strike"],
-        how="inner",
-    )
-    if matched.is_empty():
-        return []
     rows: list[dict[str, Any]] = []
+    predicted_params = np.asarray(raw_to_constrained_params(predicted_state_z), dtype=np.float64)
     for anchor_days in (30, 91):
         atm_candidates = (
-            current_contracts.group_by(["root", "expiration", "strike"])
+            current_contracts.group_by(["option_root", "root", "expiration", "strike"])
             .agg(
                 pl.col("option_type").sort().alias("option_types"),
                 pl.col("mid_1545").sum().alias("gross_premium"),
@@ -277,19 +322,31 @@ def evaluate_straddle_signal(
             continue
         pair = atm_candidates.row(0, named=True)
         next_pair = target_contracts.filter(
-            (pl.col("root") == pair["root"])
+            (pl.col("option_root") == pair["option_root"])
+            & (pl.col("root") == pair["root"])
             & (pl.col("expiration") == pair["expiration"])
             & (pl.col("strike") == pair["strike"])
         )
         if next_pair.height < 2:
             continue
-        grid_id = atm_grid_map[anchor_days]
-        current_atm_iv = float(current_sampled_surface[f"iv_{grid_id}"][0])
+        current_atm_iv = float(
+            np.asarray(
+                ssvi_implied_vol(
+                    np.asarray([0.0], dtype=np.float64),
+                    np.asarray([anchor_days / 365.0], dtype=np.float64),
+                    current_state_params,
+                ),
+                dtype=np.float64,
+            )[0]
+        )
         predicted_atm_iv = float(
-            reconstructor.predict(
-                predicted_sampled_iv,
-                np.array([0.0], dtype=np.float64),
-                np.array([anchor_days / 365.0], dtype=np.float64),
+            np.asarray(
+                ssvi_implied_vol(
+                    np.asarray([0.0], dtype=np.float64),
+                    np.asarray([anchor_days / 365.0], dtype=np.float64),
+                    predicted_params,
+                ),
+                dtype=np.float64,
             )[0]
         )
         signal = 1.0 if predicted_atm_iv - current_atm_iv > 0 else -1.0
@@ -298,31 +355,40 @@ def evaluate_straddle_signal(
         gross_return = signal * (next_premium - current_premium) / max(current_premium, 1e-12)
         entry_cost = 0.5 * float(pair["total_spread"]) / max(current_premium, 1e-12)
         exit_cost = 0.5 * float(next_pair["spread_1545"].sum()) / max(current_premium, 1e-12)
-        net_return = gross_return - entry_cost - exit_cost
         rows.append(
             {
                 "model_name": model_name,
                 "forecast_origin": quote_date,
                 "target_date": target_date,
-                "root": pair["root"],
+                "option_root": str(pair["option_root"]),
+                "root": str(pair["root"]),
                 "anchor_days": anchor_days,
                 "gross_return": gross_return,
-                "net_return": net_return,
+                "net_return": gross_return - entry_cost - exit_cost,
             }
         )
     return rows
 
 
 def summarize_straddle(rows: pl.DataFrame) -> pl.DataFrame:
-    summaries = []
-    for anchor_days, group in rows.partition_by("anchor_days", as_dict=True).items():
-        if isinstance(anchor_days, tuple):
-            anchor_value = anchor_days[0]
-        else:
-            anchor_value = anchor_days
-        utility = straddle_utility(
-            group["net_return"].to_numpy().astype(np.float64),
-            group["gross_return"].to_numpy().astype(np.float64),
+    if rows.is_empty():
+        return pl.DataFrame(
+            schema={
+                "anchor_days": pl.Int64,
+                "mean_net_return": pl.Float64,
+                "hit_rate": pl.Float64,
+                "sharpe_ratio": pl.Float64,
+            }
         )
-        summaries.append({"anchor_days": anchor_value, **utility})
-    return pl.DataFrame(summaries)
+    return (
+        rows.group_by("anchor_days")
+        .agg(
+            pl.col("net_return").mean().alias("mean_net_return"),
+            (pl.col("net_return") > 0).mean().alias("hit_rate"),
+            (
+                pl.col("net_return").mean()
+                / pl.max_horizontal(pl.col("net_return").std(), pl.lit(1e-12))
+            ).alias("sharpe_ratio"),
+        )
+        .sort("anchor_days")
+    )
