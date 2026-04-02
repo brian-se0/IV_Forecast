@@ -374,6 +374,7 @@ def summarize_straddle(rows: pl.DataFrame) -> pl.DataFrame:
     if rows.is_empty():
         return pl.DataFrame(
             schema={
+                "model_name": pl.Utf8,
                 "anchor_days": pl.Int64,
                 "mean_net_return": pl.Float64,
                 "hit_rate": pl.Float64,
@@ -381,7 +382,7 @@ def summarize_straddle(rows: pl.DataFrame) -> pl.DataFrame:
             }
         )
     return (
-        rows.group_by("anchor_days")
+        rows.group_by(["model_name", "anchor_days"])
         .agg(
             pl.col("net_return").mean().alias("mean_net_return"),
             (pl.col("net_return") > 0).mean().alias("hit_rate"),
@@ -390,5 +391,5 @@ def summarize_straddle(rows: pl.DataFrame) -> pl.DataFrame:
                 / pl.max_horizontal(pl.col("net_return").std(), pl.lit(1e-12))
             ).alias("sharpe_ratio"),
         )
-        .sort("anchor_days")
+        .sort(["anchor_days", "model_name"])
     )

@@ -208,7 +208,7 @@ def _summary_markdown(
         straddle_summary = summarize_straddle(straddle_rows)
         for row in straddle_summary.iter_rows(named=True):
             lines.append(
-                f"- `{int(row['anchor_days'])}d`: mean_net_return={row['mean_net_return']:.6f}, hit_rate={row['hit_rate']:.4f}, sharpe={row['sharpe_ratio']:.4f}"
+                f"- `{row['model_name']}` / `{int(row['anchor_days'])}d`: mean_net_return={row['mean_net_return']:.6f}, hit_rate={row['hit_rate']:.4f}, sharpe={row['sharpe_ratio']:.4f}"
             )
     lines.append("")
     return "\n".join(lines)

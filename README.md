@@ -136,6 +136,8 @@ Regenerate the summary report for an existing run:
 uv run ivs-forecast report --run-dir artifacts/runs/<run_id>
 ```
 
+The generated `summary.md` reports straddle utility separately for each model and anchor horizon.
+
 ## Main artifacts
 
 Build stage:
