@@ -13,7 +13,15 @@ from ivs_forecast.cli import app
 runner = CliRunner()
 
 
-def _write_config(tmp_path: Path, raw_root: Path, artifact_root: Path, run_id: str) -> Path:
+def _write_config(
+    tmp_path: Path,
+    raw_root: Path,
+    artifact_root: Path,
+    run_id: str | None,
+) -> Path:
+    runtime = {"seed": 20260329, "overwrite": False}
+    if run_id is not None:
+        runtime["run_id"] = run_id
     config = {
         "paths": {"raw_data_root": str(raw_root), "artifact_root": str(artifact_root)},
         "study": {
@@ -29,9 +37,10 @@ def _write_config(tmp_path: Path, raw_root: Path, artifact_root: Path, run_id: s
             "min_train_size": 20,
             "refit_frequency": 5,
         },
-        "runtime": {"seed": 20260329, "overwrite": False, "run_id": run_id},
+        "runtime": runtime,
     }
-    config_path = tmp_path / f"{run_id}.yaml"
+    config_name = run_id if run_id is not None else "generated_run_id"
+    config_path = tmp_path / f"{config_name}.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return config_path
 
@@ -84,6 +93,23 @@ def test_cli_build_data_on_synthetic_dataset(tmp_path: Path) -> None:
     assert (run_dir / "surface_nodes").is_dir()
     assert list((run_dir / "clean_contracts").glob("year=*/*.parquet"))
     assert list((run_dir / "surface_nodes").glob("year=*/*.parquet"))
+    assert (run_dir / "manifests" / "build_data_manifest.json").exists()
+
+
+def test_cli_build_data_without_explicit_run_id_uses_single_run_directory(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    artifact_root = tmp_path / "artifacts"
+    write_synthetic_vendor_dataset(raw_root, n_dates=35)
+    config_path = _write_config(tmp_path, raw_root, artifact_root, None)
+    result = runner.invoke(app, ["build-data", "--config", str(config_path)])
+    assert result.exit_code == 0, result.stdout
+    run_dirs = list((artifact_root / "runs").iterdir())
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    assert (run_dir / "raw_inventory.parquet").exists()
+    assert (run_dir / "features_targets.parquet").exists()
+    assert list((run_dir / "subset").glob("underlying_key=*/*/year=*/*.parquet"))
+    assert (run_dir / "manifests" / "verify_data_manifest.json").exists()
     assert (run_dir / "manifests" / "build_data_manifest.json").exists()
 
 

@@ -65,10 +65,16 @@ class RuntimeConfig(BaseModel):
     overwrite: bool = False
     run_id: str | None = None
 
+    @model_validator(mode="after")
+    def _resolve_default_run_id(self) -> RuntimeConfig:
+        if self.run_id is None:
+            self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self
+
     def resolved_run_id(self) -> str:
-        if self.run_id:
-            return self.run_id
-        return datetime.now().strftime("%Y%m%d_%H%M%S")
+        if self.run_id is None:
+            raise RuntimeError("runtime.run_id was not resolved during configuration loading.")
+        return self.run_id
 
 
 class AppConfig(BaseModel):

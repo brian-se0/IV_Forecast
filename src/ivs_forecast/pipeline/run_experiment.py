@@ -39,6 +39,16 @@ from ivs_forecast.pipeline.splits import (
 from ivs_forecast.pipeline.train_models import instantiate_model, tune_model_family
 
 MODEL_FAMILIES = ["state_last", "state_var1", "ssvi_tcn_direct"]
+REPORT_REQUIRED_ARTIFACTS: tuple[str, ...] = (
+    "loss_panel.parquet",
+    "forecast_ssvi_certification.parquet",
+    "pricing_utility.parquet",
+    "hedged_pnl_utility.parquet",
+    "straddle_signal_utility.parquet",
+    "feature_row_exclusions.parquet",
+    "selected_model_configs.json",
+    "manifests/run_resolved_config.yaml",
+)
 
 
 def _partition_by_single_date(frame: pl.DataFrame, column: str) -> dict[object, pl.DataFrame]:
@@ -204,7 +214,21 @@ def _summary_markdown(
     return "\n".join(lines)
 
 
+def _require_report_inputs(run_dir: Path) -> None:
+    missing = [
+        relative_path
+        for relative_path in REPORT_REQUIRED_ARTIFACTS
+        if not (run_dir / relative_path).exists()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "Run directory is incomplete. `ivs-forecast report` requires a completed "
+            f"`ivs-forecast run`. Missing artifacts under {run_dir}: {missing}"
+        )
+
+
 def write_summary_report(run_dir: Path) -> Path:
+    _require_report_inputs(run_dir)
     loss_panel = pl.read_parquet(run_dir / "loss_panel.parquet")
     certification_panel = pl.read_parquet(run_dir / "forecast_ssvi_certification.parquet")
     pricing_utility = pl.read_parquet(run_dir / "pricing_utility.parquet")
@@ -238,6 +262,7 @@ def run_experiment(config: AppConfig) -> Path:
     forward_terms = pl.read_parquet(outputs["forward_terms_path"])
     ssvi_state = pl.read_parquet(outputs["ssvi_state_path"])
     features_targets = pl.read_parquet(outputs["features_targets_path"])
+    feature_exclusions = pl.read_parquet(outputs["feature_row_exclusions_path"])
     state_store = DailyStateStore.from_frame(ssvi_state)
     clean_contracts_store = DatePartitionIndex(outputs["clean_contracts_index_path"], "clean_contracts")
     surface_nodes_store = DatePartitionIndex(outputs["surface_nodes_index_path"], "surface_nodes")
@@ -479,6 +504,7 @@ def run_experiment(config: AppConfig) -> Path:
         pricing_utility=pricing_utility,
         hedged_utility=hedged_pnl_utility,
         straddle_rows=straddle_signal_utility,
+        feature_exclusions=feature_exclusions,
         selected_models=selected_models,
     )
     summary_path = run_root / "summary.md"

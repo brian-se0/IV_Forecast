@@ -16,6 +16,7 @@ dependencies = [
   "pyyaml",
   "rich",
   "scipy",
+  "tzdata==2025.3",
   "torch",
   "typer",
 ]
