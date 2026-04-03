@@ -9,6 +9,14 @@ import polars as pl
 from ivs_forecast.features.scalars import scalar_feature_columns
 
 STATE_Z_DIM = 14
+TRADING_DATE_INDEX_SCHEMA: dict[str, pl.DataType] = {
+    "quote_date": pl.Date,
+    "option_root": pl.String,
+    "trading_day_index": pl.Int64,
+    "next_trading_date": pl.Date,
+    "has_surface_state": pl.Boolean,
+    "surface_state_row_index": pl.Int64,
+}
 
 
 @dataclass(frozen=True)
@@ -87,7 +95,7 @@ def build_trading_date_index(
                 "surface_state_row_index": surface_state_row_index,
             }
         )
-    return pl.DataFrame(rows).sort("quote_date")
+    return pl.DataFrame(rows, schema=TRADING_DATE_INDEX_SCHEMA).sort("quote_date")
 
 
 def assert_feature_target_separation() -> None:

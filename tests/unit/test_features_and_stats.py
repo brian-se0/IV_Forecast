@@ -104,6 +104,25 @@ def test_build_features_targets_and_split_manifest() -> None:
     assert len(manifest.test_target_dates) == 2
 
 
+def test_build_trading_date_index_handles_leading_dates_without_surface_state() -> None:
+    trading_dates = _ssvi_state_panel(28)["quote_date"].to_list()
+    state_panel = (
+        _ssvi_state_panel(28)
+        .filter(pl.col("quote_date") >= trading_dates[2])
+        .drop("state_row_index")
+        .with_row_index("state_row_index")
+    )
+
+    trading_index = build_trading_date_index(trading_dates, "SPX", state_panel)
+
+    assert trading_index.height == len(trading_dates)
+    assert trading_index["quote_date"][0] == trading_dates[0]
+    assert trading_index["has_surface_state"][:2].to_list() == [False, False]
+    assert trading_index["surface_state_row_index"][:2].to_list() == [None, None]
+    assert trading_index["has_surface_state"][2] is True
+    assert trading_index["surface_state_row_index"][2] == 0
+
+
 def test_future_shock_does_not_enter_origin_feature_rows() -> None:
     baseline_panel = _ssvi_state_panel(28)
     shocked_panel = baseline_panel.with_columns(
