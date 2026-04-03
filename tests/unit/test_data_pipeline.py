@@ -183,6 +183,35 @@ def test_clean_forward_and_collapse_are_root_explicit() -> None:
     assert quality["root_count"][0] == 1
 
 
+def test_estimate_forward_terms_returns_typed_empty_frame_when_no_valid_pairs() -> None:
+    frame = pl.DataFrame(
+        {
+            "quote_date": [date(2020, 1, 2), date(2020, 1, 2)],
+            "root": ["SPX", "SPX"],
+            "expiration": [date(2020, 3, 20), date(2020, 3, 20)],
+            "option_type": ["C", "P"],
+            "strike": [3000.0, 3000.0],
+            "mid_1545": [10.0, 9.0],
+            "vega_1545": [1.0, 1.0],
+        }
+    )
+
+    forward_terms, diagnostics = estimate_forward_terms(frame)
+
+    assert forward_terms.is_empty()
+    assert forward_terms.columns == [
+        "quote_date",
+        "root",
+        "option_root",
+        "expiration",
+        "discount_factor",
+        "forward_price",
+        "matched_pairs_before_prune",
+        "matched_pairs_after_prune",
+    ]
+    assert diagnostics[0].invalid_reason == "fewer_than_3_matched_strikes"
+
+
 def test_audit_vendor_corpus_reports_root_coverage(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw"
     write_synthetic_vendor_dataset(raw_root, n_dates=3, include_secondary_root=True)

@@ -5,6 +5,17 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+FORWARD_TERMS_SCHEMA: dict[str, pl.DataType] = {
+    "quote_date": pl.Date,
+    "root": pl.String,
+    "option_root": pl.String,
+    "expiration": pl.Date,
+    "discount_factor": pl.Float64,
+    "forward_price": pl.Float64,
+    "matched_pairs_before_prune": pl.Int64,
+    "matched_pairs_after_prune": pl.Int64,
+}
+
 
 @dataclass(frozen=True)
 class ForwardEstimationDiagnostics:
@@ -103,4 +114,8 @@ def estimate_forward_terms(
                 invalid_reason=invalid_reason,
             )
         )
-    return pl.DataFrame(records).sort(["quote_date", "root", "expiration"]), diagnostics
+    if records:
+        forward_terms = pl.DataFrame(records, schema=FORWARD_TERMS_SCHEMA)
+    else:
+        forward_terms = pl.DataFrame(schema=FORWARD_TERMS_SCHEMA)
+    return forward_terms.sort(["quote_date", "root", "expiration"]), diagnostics
