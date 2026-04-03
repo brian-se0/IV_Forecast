@@ -5,8 +5,8 @@ paths:
 study:
   underlying_symbol: "^SPX"
   option_root: "SPX"
-  start_date: "2012-01-03"
-  end_date: "2013-12-31"
+  start_date: "2004-01-02"
+  end_date: "2021-04-09"
   forecast_horizon_days: 1
 
 settlement:
@@ -14,12 +14,7 @@ settlement:
   proxy_time_eastern: "09:30:00"
   exact_clock: false
 
-split:
-  validation_size: 84
-  test_size: 84
-  min_train_size: 252
-  refit_frequency: 21
-
 runtime:
-  seed: 20260329
+  seed: 42
+  require_exact_window_coverage: true
   overwrite: false

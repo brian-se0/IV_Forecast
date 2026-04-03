@@ -57,6 +57,27 @@ def _write_minimal_report_inputs(run_dir: Path) -> None:
     pl.DataFrame({"exclusion_reason": ["missing_history_window"]}).write_parquet(
         run_dir / "feature_row_exclusions.parquet"
     )
+    (run_dir / "raw_corpus_contract.json").write_text(
+        json.dumps(
+            {
+                "window_coverage": {
+                    "matches_requested_window": True,
+                    "coverage_status": "exact",
+                    "requested_window": {
+                        "start_date": "2020-01-02",
+                        "end_date": "2020-01-31",
+                    },
+                    "observed_window": {
+                        "start_date": "2020-01-02",
+                        "end_date": "2020-01-31",
+                    },
+                    "missing_prefix_range": None,
+                    "missing_suffix_range": None,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "selected_model_configs.json").write_text(
         json.dumps(
             {

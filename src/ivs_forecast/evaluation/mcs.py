@@ -180,7 +180,7 @@ def run_mcs(
     alpha: float = 0.10,
     bootstrap_draws: int = 5000,
     block_length: int = 10,
-    seed: int = 20260329,
+    seed: int = 42,
 ) -> dict[str, Any]:
     model_names, loss_matrix = _validated_loss_matrix(loss_by_model)
     bootstrap_indices = stationary_bootstrap_indices(

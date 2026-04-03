@@ -9,6 +9,7 @@ Discovery contract:
 - canonical daily ZIPs may be discovered recursively under the configured raw root
 - flat and nested daily directory layouts are supported
 - grouped monthly/yearly archives must be detected explicitly and reported in `raw_corpus_contract.json`
+- the canonical benchmark requires the requested start/end dates to match the observed daily-ZIP window exactly
 
 Fatal ZIP conditions:
 
@@ -64,3 +65,4 @@ Contract notes:
 - quote-only files are unsupported
 
 `verify-data` writes a machine-readable reconciliation report and includes per-date root coverage for the configured `underlying_symbol` and `option_root`.
+For the canonical benchmark, any requested/observed window mismatch is a fatal verification error after the coverage contract is written.

@@ -13,6 +13,7 @@ from ivs_forecast.data.discovery import (
     audit_vendor_corpus,
     data_audit_markdown,
     inventory_raw_files,
+    require_exact_window_coverage,
     raw_corpus_contract,
     raw_inventory_frame,
     write_inventory_json,
@@ -58,15 +59,16 @@ def verify_data_stage(config: AppConfig) -> dict[str, Path]:
     audit_report_path = run_root / "data_audit_report.md"
     write_polars(inventory_path, inventory)
     write_inventory_json(inventory_json_path, records)
+    corpus_contract = raw_corpus_contract(
+        root=config.paths.raw_data_root,
+        records=records,
+        start_date=config.study.start_date,
+        end_date=config.study.end_date,
+        option_root=config.study.option_root,
+    )
     write_json(
         raw_corpus_contract_path,
-        raw_corpus_contract(
-            root=config.paths.raw_data_root,
-            records=records,
-            start_date=config.study.start_date,
-            end_date=config.study.end_date,
-            option_root=config.study.option_root,
-        ),
+        corpus_contract,
     )
     schema_report = audit_vendor_corpus(
         records=records,
@@ -77,6 +79,8 @@ def verify_data_stage(config: AppConfig) -> dict[str, Path]:
     )
     write_json(schema_report_path, schema_report)
     audit_report_path.write_text(data_audit_markdown(schema_report), encoding="utf-8")
+    if config.runtime.require_exact_window_coverage:
+        require_exact_window_coverage(corpus_contract["window_coverage"])
     write_stage_bundle(
         run_root / "manifests",
         "verify_data",
@@ -95,6 +99,7 @@ def verify_data_stage(config: AppConfig) -> dict[str, Path]:
             "header_anomaly_count": int(schema_report["caveat_counts"]["header_anomaly_count"]),
             "early_close_count": int(schema_report["caveat_counts"]["early_close_count"]),
             "dates_missing_option_root": len(schema_report["selected_root_coverage"]["dates_missing_option_root"]),
+            "exact_window_coverage": int(bool(corpus_contract["window_coverage"]["matches_requested_window"])),
         },
         upstream_paths=[],
     )
@@ -344,6 +349,7 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
     )
     return {
         "run_root": run_root,
+        "raw_corpus_contract_path": verify_outputs["raw_corpus_contract_path"],
         "clean_contracts_root": clean_contracts_root,
         "clean_contracts_index_path": clean_contracts_index_path,
         "forward_terms_path": forward_terms_path,

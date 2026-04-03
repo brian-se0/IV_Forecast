@@ -8,6 +8,7 @@ Version 1 supports exactly one validated protocol:
 
 - underlying symbol: `^SPX`
 - option root: `SPX`
+- canonical benchmark window: `2004-01-02` through `2021-04-09`
 - horizon: one next valid trading day
 - target timestamp: next-day 15:45 ET surface
 - raw data source: `UnderlyingOptionsEODCalcs_YYYY-MM-DD.zip`
@@ -117,6 +118,7 @@ The verification stage must write:
 - `data_audit_report.md`
 
 The reconciliation report must include root coverage by date for the selected underlying and configured option root.
+The canonical benchmark must fail if the requested study window does not exactly match the observed raw daily-ZIP window.
 
 ## 6. Pre-modeling backbone
 

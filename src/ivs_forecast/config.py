@@ -61,8 +61,9 @@ class SettlementConfig(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    seed: int = 20260329
+    seed: int = 42
     overwrite: bool = False
+    require_exact_window_coverage: bool = True
     run_id: str | None = None
 
     @model_validator(mode="after")

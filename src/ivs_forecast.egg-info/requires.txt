@@ -1,0 +1,14 @@
+numpy
+polars
+pyarrow
+pydantic
+pyyaml
+rich
+scipy
+tzdata==2025.3
+torch
+typer
+
+[dev]
+pytest
+ruff

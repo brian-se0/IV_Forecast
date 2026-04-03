@@ -27,7 +27,12 @@ def _config(raw_root: Path, artifact_root: Path, run_id: str) -> AppConfig:
                 "min_train_size": 5,
                 "refit_frequency": 5,
             },
-            "runtime": {"seed": 20260329, "overwrite": False, "run_id": run_id},
+            "runtime": {
+                "seed": 42,
+                "overwrite": False,
+                "require_exact_window_coverage": False,
+                "run_id": run_id,
+            },
         }
     )
 

@@ -1,3 +1,23 @@
+Metadata-Version: 2.4
+Name: ivs-forecast
+Version: 0.1.0
+Summary: Chronology-safe next-day implied volatility surface forecasting framework.
+Requires-Python: <3.15,>=3.14.3
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: polars
+Requires-Dist: pyarrow
+Requires-Dist: pydantic
+Requires-Dist: pyyaml
+Requires-Dist: rich
+Requires-Dist: scipy
+Requires-Dist: tzdata==2025.3
+Requires-Dist: torch
+Requires-Dist: typer
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+
 # IVS Forecast
 
 A reproducible framework for root-explicit, chronology-safe, next-trading-day implied-volatility-surface forecasting on Cboe Option EOD Summary files.
@@ -100,19 +120,14 @@ paths:
 study:
   underlying_symbol: "^SPX"
   option_root: "SPX"
-  start_date: "2004-01-02"
-  end_date: "2021-04-09"
+  start_date: "2012-01-03"
+  end_date: "2021-12-31"
   forecast_horizon_days: 1
 
 settlement:
   settlement_style: "AM_SOQ_PROXY"
   proxy_time_eastern: "09:30:00"
   exact_clock: false
-
-runtime:
-  seed: 42
-  require_exact_window_coverage: true
-  overwrite: false
 ```
 
 ## Canonical commands
@@ -120,19 +135,19 @@ runtime:
 Verify raw files and schema:
 
 ```bash
-uv run ivs-forecast verify-data --config configs/experiments/spx_full_available_2004_2021q2.yaml
+uv run ivs-forecast verify-data --config configs/experiments/spx_public_2012plus.yaml
 ```
 
 Build the immutable preprocessing artifacts:
 
 ```bash
-uv run ivs-forecast build-data --config configs/experiments/spx_full_available_2004_2021q2.yaml
+uv run ivs-forecast build-data --config configs/experiments/spx_public_2012plus.yaml
 ```
 
 Run the full experiment:
 
 ```bash
-uv run ivs-forecast run --config configs/experiments/spx_full_available_2004_2021q2.yaml
+uv run ivs-forecast run --config configs/experiments/spx_public_2012plus.yaml
 ```
 
 Regenerate the summary report for an existing run:
@@ -140,9 +155,6 @@ Regenerate the summary report for an existing run:
 ```bash
 uv run ivs-forecast report --run-dir artifacts/runs/<run_id>
 ```
-
-The generated `summary.md` reports straddle utility separately for each model and anchor horizon.
-The canonical benchmark requires the requested study window to match the observed raw ZIP window exactly.
 
 ## Main artifacts
 

@@ -6,7 +6,7 @@ import zipfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -100,6 +100,67 @@ def inspect_zip(path: Path) -> RawZipRecord:
     )
 
 
+def requested_window_coverage(
+    records: list[RawZipRecord],
+    start_date: date,
+    end_date: date,
+) -> dict[str, Any]:
+    observed_start = min((record.trade_date for record in records), default=None)
+    observed_end = max((record.trade_date for record in records), default=None)
+    matches_requested_window = observed_start == start_date and observed_end == end_date
+    prefix_gap = observed_start is not None and observed_start > start_date
+    suffix_gap = observed_end is not None and observed_end < end_date
+    if matches_requested_window:
+        coverage_status = "exact"
+    elif prefix_gap and suffix_gap:
+        coverage_status = "short_both"
+    elif prefix_gap:
+        coverage_status = "short_prefix"
+    elif suffix_gap:
+        coverage_status = "short_suffix"
+    else:
+        coverage_status = "mismatch"
+    return {
+        "matches_requested_window": matches_requested_window,
+        "coverage_status": coverage_status,
+        "requested_window": {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+        },
+        "observed_window": {
+            "start_date": observed_start.isoformat() if observed_start else None,
+            "end_date": observed_end.isoformat() if observed_end else None,
+        },
+        "missing_prefix_range": (
+            {
+                "start_date": start_date.isoformat(),
+                "end_date": (observed_start - timedelta(days=1)).isoformat(),
+            }
+            if prefix_gap
+            else None
+        ),
+        "missing_suffix_range": (
+            {
+                "start_date": (observed_end + timedelta(days=1)).isoformat(),
+                "end_date": end_date.isoformat(),
+            }
+            if suffix_gap
+            else None
+        ),
+    }
+
+
+def require_exact_window_coverage(coverage: dict[str, Any]) -> None:
+    if coverage["matches_requested_window"]:
+        return
+    raise ValueError(
+        "Configured study window does not exactly match the observed raw daily ZIP coverage. "
+        f"Requested {coverage['requested_window']['start_date']}..{coverage['requested_window']['end_date']} "
+        f"but observed {coverage['observed_window']['start_date']}..{coverage['observed_window']['end_date']}. "
+        f"Coverage status: {coverage['coverage_status']}."
+    )
+
+
 def raw_corpus_contract(
     root: Path,
     records: list[RawZipRecord],
@@ -113,18 +174,12 @@ def raw_corpus_contract(
         for record in records
     }
     grouping_mode = "flat_daily" if relative_dirs in [set(), {"."}] else "nested_daily"
-    observed_start = min((record.trade_date for record in records), default=None)
-    observed_end = max((record.trade_date for record in records), default=None)
+    coverage = requested_window_coverage(records, start_date, end_date)
     return {
         "raw_data_root": str(root),
-        "requested_window": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-        },
-        "observed_window": {
-            "start_date": observed_start.isoformat() if observed_start else None,
-            "end_date": observed_end.isoformat() if observed_end else None,
-        },
+        "requested_window": coverage["requested_window"],
+        "observed_window": coverage["observed_window"],
+        "window_coverage": coverage,
         "daily_zip_count": len(records),
         "grouping_mode": grouping_mode,
         "relative_parent_directories": sorted(relative_dirs),
@@ -438,6 +493,7 @@ def audit_vendor_corpus(
     )
     early_close_calendar = load_early_close_calendar()
     early_close_dates = early_close_dates_in_range(start_date, end_date)
+    coverage = requested_window_coverage(records, start_date, end_date)
     return {
         "pass_status": True,
         "study_window": {
@@ -446,6 +502,7 @@ def audit_vendor_corpus(
             "underlying_symbol": underlying_symbol,
             "option_root": option_root,
         },
+        "window_coverage": coverage,
         "raw_zip_count": len(records),
         "documented_columns": list(DOCUMENTED_COLUMNS),
         "observed_columns_union": sorted(observed_columns_union),
@@ -522,6 +579,28 @@ def data_audit_markdown(report: dict[str, Any]) -> str:
         f"`{window['underlying_symbol']}` with option root `{window['option_root']}`."
     )
     lines.append(f"Audited raw ZIP count: `{report['raw_zip_count']}`.")
+    lines.append("")
+    lines.append("## Coverage")
+    coverage = report["window_coverage"]
+    lines.append(
+        f"Coverage status: `{coverage['coverage_status']}`; exact match: `{coverage['matches_requested_window']}`."
+    )
+    lines.append(
+        f"Requested window: `{coverage['requested_window']['start_date']}` to `{coverage['requested_window']['end_date']}`."
+    )
+    lines.append(
+        f"Observed window: `{coverage['observed_window']['start_date']}` to `{coverage['observed_window']['end_date']}`."
+    )
+    if coverage["missing_prefix_range"] is not None:
+        lines.append(
+            "Missing prefix range: "
+            f"`{coverage['missing_prefix_range']['start_date']}` to `{coverage['missing_prefix_range']['end_date']}`."
+        )
+    if coverage["missing_suffix_range"] is not None:
+        lines.append(
+            "Missing suffix range: "
+            f"`{coverage['missing_suffix_range']['start_date']}` to `{coverage['missing_suffix_range']['end_date']}`."
+        )
     lines.append("")
     lines.append("## Schema")
     lines.append(

@@ -34,6 +34,7 @@ Required outputs:
 Schema notes:
 
 - all downstream modeling artifacts carry `option_root`
+- `raw_corpus_contract.json` records requested versus observed window coverage and whether they match exactly
 - `forward_terms.parquet` remains keyed by `quote_date`, `root`, and `expiration`
 - `surface_nodes/` partitions preserve root-explicit node coordinates
 - `ssvi_state.parquet` stores both constrained SSVI parameters and latent `state_z_*` columns

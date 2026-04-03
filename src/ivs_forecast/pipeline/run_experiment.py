@@ -40,6 +40,7 @@ from ivs_forecast.pipeline.train_models import instantiate_model, tune_model_fam
 
 MODEL_FAMILIES = ["state_last", "state_var1", "ssvi_tcn_direct"]
 REPORT_REQUIRED_ARTIFACTS: tuple[str, ...] = (
+    "raw_corpus_contract.json",
     "loss_panel.parquet",
     "forecast_ssvi_certification.parquet",
     "pricing_utility.parquet",
@@ -119,9 +120,11 @@ def _summary_markdown(
     straddle_rows: pl.DataFrame,
     feature_exclusions: pl.DataFrame,
     selected_models: dict[str, dict[str, Any] | None],
+    raw_corpus_contract: dict[str, Any],
 ) -> str:
     study = config_dump["study"]
     settlement = config_dump["settlement"]
+    coverage = raw_corpus_contract["window_coverage"]
     lines = ["# Experiment Summary", ""]
     lines.append("## Study")
     lines.append(
@@ -138,6 +141,17 @@ def _summary_markdown(
     lines.append("## Literature Positioning")
     lines.append(
         "This repo now implements a root-explicit, one-step, supervised, arbitrage-aware next-day IVS forecaster. It does not use the older two-step grid-then-decoder design, and it does not claim a generic nonlinear or generative novelty story."
+    )
+    lines.append("")
+    lines.append("## Corpus Coverage")
+    lines.append(
+        f"- requested_window: `{coverage['requested_window']['start_date']}` to `{coverage['requested_window']['end_date']}`"
+    )
+    lines.append(
+        f"- observed_window: `{coverage['observed_window']['start_date']}` to `{coverage['observed_window']['end_date']}`"
+    )
+    lines.append(
+        f"- exact_window_match: `{coverage['matches_requested_window']}`; coverage_status: `{coverage['coverage_status']}`"
     )
     lines.append("")
     if not feature_exclusions.is_empty():
@@ -238,6 +252,7 @@ def write_summary_report(run_dir: Path) -> Path:
     selected_models = json.loads(
         (run_dir / "selected_model_configs.json").read_text(encoding="utf-8")
     )
+    raw_corpus_contract = json.loads((run_dir / "raw_corpus_contract.json").read_text(encoding="utf-8"))
     config_dump = yaml.safe_load(
         (run_dir / "manifests" / "run_resolved_config.yaml").read_text(encoding="utf-8")
     )
@@ -250,6 +265,7 @@ def write_summary_report(run_dir: Path) -> Path:
         straddle_rows=straddle_rows,
         feature_exclusions=feature_exclusions,
         selected_models=selected_models,
+        raw_corpus_contract=raw_corpus_contract,
     )
     summary_path = run_dir / "summary.md"
     summary_path.write_text(summary, encoding="utf-8")
@@ -259,6 +275,9 @@ def write_summary_report(run_dir: Path) -> Path:
 def run_experiment(config: AppConfig) -> Path:
     outputs = build_data_stage(config)
     run_root = outputs["run_root"]
+    raw_corpus_contract = json.loads(
+        Path(outputs["raw_corpus_contract_path"]).read_text(encoding="utf-8")
+    )
     forward_terms = pl.read_parquet(outputs["forward_terms_path"])
     ssvi_state = pl.read_parquet(outputs["ssvi_state_path"])
     features_targets = pl.read_parquet(outputs["features_targets_path"])
@@ -506,6 +525,7 @@ def run_experiment(config: AppConfig) -> Path:
         straddle_rows=straddle_signal_utility,
         feature_exclusions=feature_exclusions,
         selected_models=selected_models,
+        raw_corpus_contract=raw_corpus_contract,
     )
     summary_path = run_root / "summary.md"
     summary_path.write_text(summary, encoding="utf-8")

@@ -19,7 +19,7 @@ def _write_config(
     artifact_root: Path,
     run_id: str | None,
 ) -> Path:
-    runtime = {"seed": 20260329, "overwrite": False}
+    runtime = {"seed": 42, "overwrite": False, "require_exact_window_coverage": False}
     if run_id is not None:
         runtime["run_id"] = run_id
     config = {

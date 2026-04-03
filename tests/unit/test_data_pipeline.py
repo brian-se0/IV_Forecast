@@ -50,9 +50,31 @@ def _config(raw_root: str = "D:/Options Data", artifact_root: str = "./artifacts
                 "min_train_size": 3,
                 "refit_frequency": 1,
             },
-            "runtime": {"seed": 20260329, "overwrite": False, "run_id": "unit_run"},
+            "runtime": {
+                "seed": 42,
+                "overwrite": False,
+                "require_exact_window_coverage": False,
+                "run_id": "unit_run",
+            },
         }
     )
+
+
+def test_runtime_seed_defaults_to_42() -> None:
+    config = AppConfig.model_validate(
+        {
+            "paths": {"raw_data_root": "D:/Options Data", "artifact_root": "./artifacts"},
+            "study": {
+                "underlying_symbol": "^SPX",
+                "option_root": "SPX",
+                "start_date": "2020-01-02",
+                "end_date": "2020-12-31",
+                "forecast_horizon_days": 1,
+            },
+        }
+    )
+    assert config.runtime.seed == 42
+    assert config.runtime.require_exact_window_coverage is True
 
 
 def test_parse_trade_date_from_filename() -> None:
@@ -119,6 +141,7 @@ def test_early_close_manifest_is_loaded_from_checked_in_resource() -> None:
     calendar = load_early_close_calendar()
     july_entries = calendar.entries_in_range(date(2021, 7, 1), date(2021, 7, 5))
     assert calendar.calendar_name == "cboe_us_options_early_closes_manifest_v1"
+    assert calendar.coverage_start == date(2004, 1, 1)
     assert july_entries[0].quote_date == date(2021, 7, 2)
     assert july_entries[0].market_close_time_eastern == "12:45"
 
@@ -236,6 +259,40 @@ def test_inventory_raw_files_supports_nested_daily_layout(tmp_path: Path) -> Non
     assert len(records) == 3
     contract = raw_corpus_contract(raw_root, records, date(2020, 1, 2), date(2020, 1, 31), "SPX")
     assert contract["grouping_mode"] == "nested_daily"
+
+
+def test_raw_corpus_contract_reports_exact_window_match(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    dates = write_synthetic_vendor_dataset(raw_root, n_dates=3)
+    start_date = date.fromisoformat(dates[0])
+    end_date = date.fromisoformat(dates[-1])
+    records = inventory_raw_files(raw_root, start_date, end_date)
+    contract = raw_corpus_contract(raw_root, records, start_date, end_date, "SPX")
+    assert contract["window_coverage"]["matches_requested_window"] is True
+    assert contract["window_coverage"]["coverage_status"] == "exact"
+
+
+def test_build_data_fails_on_window_coverage_mismatch_when_required(tmp_path: Path) -> None:
+    raw_root = tmp_path / "raw"
+    artifact_root = tmp_path / "artifacts"
+    dates = write_synthetic_vendor_dataset(raw_root, n_dates=5)
+    config = AppConfig.model_validate(
+        {
+            "paths": {"raw_data_root": str(raw_root), "artifact_root": str(artifact_root)},
+            "study": {
+                "underlying_symbol": "^SPX",
+                "option_root": "SPX",
+                "start_date": dates[0],
+                "end_date": "2020-01-31",
+                "forecast_horizon_days": 1,
+                "min_surface_nodes": 3,
+                "min_valid_expiries": 1,
+            },
+            "runtime": {"seed": 42, "overwrite": False, "run_id": "coverage_fail"},
+        }
+    )
+    with pytest.raises(ValueError, match="does not exactly match the observed raw daily ZIP coverage"):
+        build_data_stage(config)
 
 
 def test_inventory_raw_files_rejects_grouped_archive_without_daily_zips(tmp_path: Path) -> None:

@@ -10,5 +10,6 @@ study:
   forecast_horizon_days: 1
 
 runtime:
-  seed: 20260329
+  seed: 42
+  require_exact_window_coverage: true
   overwrite: false
