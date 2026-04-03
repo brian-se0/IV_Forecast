@@ -1,2 +1,0 @@
-[console_scripts]
-ivs-forecast = ivs_forecast.cli:app
