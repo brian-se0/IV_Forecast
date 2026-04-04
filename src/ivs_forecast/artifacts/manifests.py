@@ -60,22 +60,47 @@ RUNTIME_PACKAGE_NAMES: tuple[str, ...] = (
 )
 
 
-def resolve_git_commit() -> str:
+def _run_git_command(arguments: list[str]) -> str:
+    repo_root = Path(__file__).resolve().parents[3]
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", *arguments],
             check=True,
             capture_output=True,
             text=True,
+            cwd=repo_root,
         )
     except FileNotFoundError as exc:
         raise RuntimeError("Git is required to resolve reproducibility metadata.") from exc
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError("Unable to resolve git commit for reproducibility metadata.") from exc
-    commit = result.stdout.strip()
+        raise RuntimeError(
+            "Unable to resolve git metadata for reproducibility artifacts."
+        ) from exc
+    output = result.stdout.strip()
+    if not output and arguments[:2] != ["status", "--short"]:
+        raise RuntimeError(f"Git metadata command returned an empty value: {arguments!r}.")
+    return output
+
+
+def resolve_git_commit() -> str:
+    commit = _run_git_command(["rev-parse", "HEAD"])
     if not commit:
         raise RuntimeError("Git commit resolution returned an empty value.")
     return commit
+
+
+def resolve_git_repository_root() -> str:
+    return _run_git_command(["rev-parse", "--show-toplevel"])
+
+
+def resolve_git_worktree_status() -> dict[str, object]:
+    status_output = _run_git_command(["status", "--short", "--untracked-files=normal"])
+    status_lines = [line for line in status_output.splitlines() if line.strip()]
+    return {
+        "repository_root": resolve_git_repository_root(),
+        "dirty": bool(status_lines),
+        "status_lines": status_lines,
+    }
 
 
 def resolve_package_versions() -> dict[str, str]:

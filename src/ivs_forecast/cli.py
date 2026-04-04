@@ -70,11 +70,20 @@ def export_bundle(
     run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay=False),
     output: Path = typer.Option(..., "--output"),
     overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing bundle zip."),
+    allow_dirty_worktree: bool = typer.Option(
+        False,
+        "--allow-dirty-worktree",
+        help=(
+            "Export even when the git worktree is dirty and record that dirty state in "
+            "evidence_manifest.json."
+        ),
+    ),
 ) -> None:
     bundle_path = export_run_bundle(
         run_root=run_dir,
         destination=output,
         model_families=["state_last", "state_var1", "ssvi_tcn_direct"],
         overwrite=overwrite,
+        allow_dirty_worktree=allow_dirty_worktree,
     )
     console.print(f"Wrote bundle to {bundle_path}")

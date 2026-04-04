@@ -43,7 +43,7 @@ The end-to-end workflow is:
 10. Build a narrow feature index with 22-day chronology-safe history windows, same-day scalar regime/liquidity features, a checked trading-date index, and explicit row exclusions when the immediate next trading day lacks a valid target state.
 11. Train and compare exactly three models: `state_last`, `state_var1`, and `ssvi_tcn_direct`.
 12. Decode forecasts directly onto realized next-day nodes and contracts for loss, pricing, hedging, straddle, DM, and MCS outputs.
-13. Write date-level stage-loss forensics, by-year coverage summaries, and a validated bundle manifest for external audit.
+13. Write date-level stage-loss forensics, by-year coverage summaries, and validated bundle-export metadata for external audit.
 
 ## Model set
 
@@ -148,8 +148,15 @@ Export a validated evidence bundle for external review:
 uv run ivs-forecast export-bundle --run-dir artifacts/runs/<run_id> --output artifacts/upload_bundles/<run_id>.zip
 ```
 
+If the repository worktree is intentionally dirty and that state must be preserved in the review bundle, opt in explicitly:
+
+```bash
+uv run ivs-forecast export-bundle --run-dir artifacts/runs/<run_id> --output artifacts/upload_bundles/<run_id>.zip --allow-dirty-worktree
+```
+
 The generated `summary.md` reports straddle utility separately for each model and anchor horizon.
 The canonical benchmark requires the requested study window to match the observed raw ZIP window exactly.
+`export-bundle` validates that the verify/build/run manifests agree on `git_commit` and `config_sha256`, then writes bundle-only `evidence_manifest.json` metadata with the run environment and git worktree status.
 
 ## Main artifacts
 
@@ -196,6 +203,7 @@ Run stage:
 - `bundle_manifest.json`
 
 Every stage also writes a manifest and resolved-config snapshot under `manifests/`.
+Exported review bundles additionally contain `evidence_manifest.json`.
 
 ## Environment
 

@@ -7,13 +7,19 @@ import numpy as np
 import pytest
 
 from ivs_forecast.artifacts.bundles import (
+    EVIDENCE_MANIFEST_NAME,
     export_run_bundle,
     resolve_run_bundle_contract,
     write_artifact_contract_version,
     write_run_bundle_manifest,
 )
 from ivs_forecast.artifacts.hashing import sha256_file
-from ivs_forecast.artifacts.manifests import build_stage_manifest
+from ivs_forecast.artifacts.manifests import (
+    build_stage_manifest,
+    resolve_git_commit,
+    write_json,
+    write_yaml,
+)
 from ivs_forecast.evaluation.mcs import run_mcs
 
 
@@ -34,6 +40,32 @@ def test_build_stage_manifest_records_primary_artifacts(tmp_path) -> None:
     assert manifest.package_versions["numpy"]
     assert manifest.global_seed == 123
     assert manifest.primary_artifacts[0].sha256 == sha256_file(artifact_path)
+
+
+def _write_stage_manifests(
+    run_root,
+    *,
+    git_commit: str | None = None,
+    config_dump: dict[str, object] | None = None,
+    config_sha256: str | None = None,
+) -> None:
+    config_dump = config_dump or {"study": {"underlying_symbol": "^SPX", "option_root": "SPX"}}
+    manifests_root = run_root / "manifests"
+    manifests_root.mkdir(parents=True, exist_ok=True)
+    for stage_name in ("verify_data", "build_data", "run"):
+        manifest = build_stage_manifest(
+            stage_name=stage_name,
+            config_dump=config_dump,
+            global_seed=42,
+            primary_artifact_paths=[],
+            upstream_paths=[],
+        )
+        if git_commit is not None:
+            manifest.git_commit = git_commit
+        if config_sha256 is not None:
+            manifest.config_sha256 = config_sha256
+        write_json(manifests_root / f"{stage_name}_manifest.json", manifest.model_dump())
+        write_yaml(manifests_root / f"{stage_name}_resolved_config.yaml", config_dump)
 
 
 def _write_contract_run_tree(run_root) -> None:
@@ -68,17 +100,12 @@ def _write_contract_run_tree(run_root) -> None:
         "dm_tests.json",
         "mcs_results.json",
         "summary.md",
-        "manifests/verify_data_manifest.json",
-        "manifests/verify_data_resolved_config.yaml",
-        "manifests/build_data_manifest.json",
-        "manifests/build_data_resolved_config.yaml",
-        "manifests/run_manifest.json",
-        "manifests/run_resolved_config.yaml",
     ]
     for relative_path in top_level_files:
         path = run_root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative_path, encoding="utf-8")
+    _write_stage_manifests(run_root)
     for model_name in ("state_last", "state_var1", "ssvi_tcn_direct"):
         model_root = run_root / "models" / model_name
         model_root.mkdir(parents=True, exist_ok=True)
@@ -108,6 +135,8 @@ def test_write_run_bundle_manifest_requires_full_run_contract(tmp_path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     required_paths = {item["relative_path"] for item in manifest["required_artifacts"]}
     optional_paths = {item["relative_path"] for item in manifest["optional_artifacts"]}
+    assert manifest["git_commit"] == resolve_git_commit()
+    assert set(manifest["stage_manifests"]) == {"verify_data", "build_data", "run"}
     assert "models/state_last/forecast_node_panel.parquet" in required_paths
     assert "models/ssvi_tcn_direct/model_checkpoint.pt" in optional_paths
 
@@ -122,10 +151,18 @@ def test_resolve_run_bundle_contract_fails_when_required_artifact_is_missing(tmp
         resolve_run_bundle_contract(run_root, ["state_last", "state_var1", "ssvi_tcn_direct"])
 
 
-def test_export_run_bundle_writes_zip_from_validated_manifest(tmp_path) -> None:
+def test_export_run_bundle_writes_zip_from_validated_manifest(tmp_path, monkeypatch) -> None:
     run_root = tmp_path / "run"
     run_root.mkdir()
     _write_contract_run_tree(run_root)
+    monkeypatch.setattr(
+        "ivs_forecast.artifacts.bundles.resolve_git_worktree_status",
+        lambda: {
+            "repository_root": "D:/IV_Forecast",
+            "dirty": False,
+            "status_lines": [],
+        },
+    )
 
     bundle_path = export_run_bundle(
         run_root=run_root,
@@ -135,9 +172,87 @@ def test_export_run_bundle_writes_zip_from_validated_manifest(tmp_path) -> None:
 
     with zipfile.ZipFile(bundle_path) as handle:
         names = set(handle.namelist())
+        evidence = json.loads(handle.read(EVIDENCE_MANIFEST_NAME))
     assert "bundle_manifest.json" in names
+    assert EVIDENCE_MANIFEST_NAME in names
     assert "models/ssvi_tcn_direct/forecast_ssvi_state.parquet" in names
     assert "artifact_contract_version.json" in names
+    assert evidence["git_commit"] == resolve_git_commit()
+    assert evidence["git_worktree_dirty"] is False
+    assert evidence["dirty_worktree_allowed"] is False
+
+
+def test_export_run_bundle_fails_when_stage_manifest_commits_disagree(tmp_path, monkeypatch) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_contract_run_tree(run_root)
+    build_manifest_path = run_root / "manifests" / "build_data_manifest.json"
+    build_manifest = json.loads(build_manifest_path.read_text(encoding="utf-8"))
+    build_manifest["git_commit"] = "0" * 40
+    build_manifest_path.write_text(json.dumps(build_manifest, indent=2, sort_keys=True), encoding="utf-8")
+    monkeypatch.setattr(
+        "ivs_forecast.artifacts.bundles.resolve_git_worktree_status",
+        lambda: {
+            "repository_root": "D:/IV_Forecast",
+            "dirty": False,
+            "status_lines": [],
+        },
+    )
+
+    with pytest.raises(ValueError, match="git_commit"):
+        export_run_bundle(
+            run_root=run_root,
+            destination=tmp_path / "bundle.zip",
+            model_families=["state_last", "state_var1", "ssvi_tcn_direct"],
+        )
+
+
+def test_export_run_bundle_requires_clean_worktree_by_default(tmp_path, monkeypatch) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_contract_run_tree(run_root)
+    monkeypatch.setattr(
+        "ivs_forecast.artifacts.bundles.resolve_git_worktree_status",
+        lambda: {
+            "repository_root": "D:/IV_Forecast",
+            "dirty": True,
+            "status_lines": [" M src/ivs_forecast/artifacts/bundles.py"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="clean git worktree"):
+        export_run_bundle(
+            run_root=run_root,
+            destination=tmp_path / "bundle.zip",
+            model_families=["state_last", "state_var1", "ssvi_tcn_direct"],
+        )
+
+
+def test_export_run_bundle_records_dirty_worktree_when_allowed(tmp_path, monkeypatch) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_contract_run_tree(run_root)
+    monkeypatch.setattr(
+        "ivs_forecast.artifacts.bundles.resolve_git_worktree_status",
+        lambda: {
+            "repository_root": "D:/IV_Forecast",
+            "dirty": True,
+            "status_lines": [" M src/ivs_forecast/artifacts/bundles.py"],
+        },
+    )
+
+    bundle_path = export_run_bundle(
+        run_root=run_root,
+        destination=tmp_path / "bundle.zip",
+        model_families=["state_last", "state_var1", "ssvi_tcn_direct"],
+        allow_dirty_worktree=True,
+    )
+
+    with zipfile.ZipFile(bundle_path) as handle:
+        evidence = json.loads(handle.read(EVIDENCE_MANIFEST_NAME))
+    assert evidence["git_worktree_dirty"] is True
+    assert evidence["dirty_worktree_allowed"] is True
+    assert evidence["git_status_porcelain"] == [" M src/ivs_forecast/artifacts/bundles.py"]
 
 
 def test_run_mcs_excludes_dominated_model_and_is_reproducible() -> None:

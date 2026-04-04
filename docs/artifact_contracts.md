@@ -76,7 +76,32 @@ The `models/<model_name>/` directory may also contain:
 - `model_artifact.json`
 - `model_checkpoint.pt` for `ssvi_tcn_direct`
 
-`bundle_manifest.json` enumerates the validated evidence-bundle file set with SHA256 hashes so external review bundles can be exported without silently omitting required artifacts.
+`bundle_manifest.json` enumerates the validated evidence-bundle file set with SHA256 hashes and records the common `git_commit` and `config_sha256` resolved from the verify/build/run manifests.
+
+## Exported bundle contract
+
+`ivs-forecast export-bundle` validates that:
+
+- `manifests/verify_data_manifest.json` exists
+- `manifests/build_data_manifest.json` exists
+- `manifests/run_manifest.json` exists
+- the three stage manifests agree on `git_commit`
+- the three stage manifests agree on `config_sha256`
+- the git worktree is clean unless `--allow-dirty-worktree` is explicitly set
+
+Each exported bundle contains a bundle-only top-level `evidence_manifest.json` with:
+
+- `git_commit`
+- `config_sha256`
+- `python_version`
+- `package_versions`
+- `platform`
+- `cuda`
+- `created_at_utc`
+- `git_worktree_dirty`
+- `dirty_worktree_allowed`
+- `git_status_porcelain`
+- stage-manifest SHA256 references
 
 ## Removed artifacts
 
