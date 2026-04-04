@@ -147,6 +147,10 @@ These artifacts are immutable once written:
 - `feature_row_exclusions.parquet`
 - `settlement_convention.json`
 - `features_targets.parquet`
+- `stage_loss_by_date.parquet`
+- `stage_coverage_by_year.json`
+- `forward_invalid_reasons.json`
+- `benchmark_contract.json`
 
 ## 7. SSVI calibration
 
@@ -262,6 +266,8 @@ The run stage must write:
 - `dm_tests.json`
 - `mcs_results.json`
 - `summary.md`
+- `artifact_contract_version.json`
+- `bundle_manifest.json`
 
 The summary must print:
 

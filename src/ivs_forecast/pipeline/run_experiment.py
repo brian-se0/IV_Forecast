@@ -8,6 +8,10 @@ import numpy as np
 import polars as pl
 import yaml
 
+from ivs_forecast.artifacts.bundles import (
+    write_artifact_contract_version,
+    write_run_bundle_manifest,
+)
 from ivs_forecast.artifacts.manifests import (
     write_json,
     write_polars,
@@ -121,6 +125,7 @@ def _summary_markdown(
     feature_exclusions: pl.DataFrame,
     selected_models: dict[str, dict[str, Any] | None],
     raw_corpus_contract: dict[str, Any],
+    benchmark_contract: dict[str, Any] | None = None,
 ) -> str:
     study = config_dump["study"]
     settlement = config_dump["settlement"]
@@ -153,6 +158,26 @@ def _summary_markdown(
     lines.append(
         f"- exact_window_match: `{coverage['matches_requested_window']}`; coverage_status: `{coverage['coverage_status']}`"
     )
+    if benchmark_contract is not None:
+        forecastable = benchmark_contract["forecastable_window"]
+        lines.append("")
+        lines.append("## Forecastable Window")
+        lines.append(
+            f"- ssvi_state_window: `{forecastable['ssvi_state_window']['start_date']}` to `{forecastable['ssvi_state_window']['end_date']}` "
+            f"({forecastable['ssvi_state_window']['row_count']} dates)"
+        )
+        lines.append(
+            f"- feature_origin_window: `{forecastable['feature_origin_window']['start_date']}` to `{forecastable['feature_origin_window']['end_date']}` "
+            f"({forecastable['feature_origin_window']['row_count']} rows)"
+        )
+        lines.append(
+            f"- feature_target_window: `{forecastable['feature_target_window']['start_date']}` to `{forecastable['feature_target_window']['end_date']}` "
+            f"({forecastable['feature_target_window']['row_count']} rows)"
+        )
+        lines.append(
+            f"- history_window_days: `{forecastable['history_window_days']}`; feature_candidate_days: `{forecastable['feature_candidate_days']}`; "
+            f"feature_exclusion_count: `{forecastable['feature_exclusion_count']}`"
+        )
     lines.append("")
     if not feature_exclusions.is_empty():
         lines.append("## Feature Index")
@@ -253,6 +278,10 @@ def write_summary_report(run_dir: Path) -> Path:
         (run_dir / "selected_model_configs.json").read_text(encoding="utf-8")
     )
     raw_corpus_contract = json.loads((run_dir / "raw_corpus_contract.json").read_text(encoding="utf-8"))
+    benchmark_contract = None
+    benchmark_contract_path = run_dir / "benchmark_contract.json"
+    if benchmark_contract_path.exists():
+        benchmark_contract = json.loads(benchmark_contract_path.read_text(encoding="utf-8"))
     config_dump = yaml.safe_load(
         (run_dir / "manifests" / "run_resolved_config.yaml").read_text(encoding="utf-8")
     )
@@ -266,6 +295,7 @@ def write_summary_report(run_dir: Path) -> Path:
         feature_exclusions=feature_exclusions,
         selected_models=selected_models,
         raw_corpus_contract=raw_corpus_contract,
+        benchmark_contract=benchmark_contract,
     )
     summary_path = run_dir / "summary.md"
     summary_path.write_text(summary, encoding="utf-8")
@@ -277,6 +307,9 @@ def run_experiment(config: AppConfig) -> Path:
     run_root = outputs["run_root"]
     raw_corpus_contract = json.loads(
         Path(outputs["raw_corpus_contract_path"]).read_text(encoding="utf-8")
+    )
+    benchmark_contract = json.loads(
+        Path(outputs["benchmark_contract_path"]).read_text(encoding="utf-8")
     )
     forward_terms = pl.read_parquet(outputs["forward_terms_path"])
     ssvi_state = pl.read_parquet(outputs["ssvi_state_path"])
@@ -526,9 +559,37 @@ def run_experiment(config: AppConfig) -> Path:
         feature_exclusions=feature_exclusions,
         selected_models=selected_models,
         raw_corpus_contract=raw_corpus_contract,
+        benchmark_contract=benchmark_contract,
     )
     summary_path = run_root / "summary.md"
     summary_path.write_text(summary, encoding="utf-8")
+    artifact_contract_version_path = write_artifact_contract_version(run_root)
+    run_primary_artifacts = [
+        run_root / "split_manifest.json",
+        run_root / "selected_model_configs.json",
+        run_root / "loss_panel.parquet",
+        run_root / "forecast_ssvi_certification.parquet",
+        run_root / "pricing_utility.parquet",
+        run_root / "hedged_pnl_utility.parquet",
+        run_root / "straddle_signal_utility.parquet",
+        run_root / "dm_tests.json",
+        run_root / "mcs_results.json",
+        summary_path,
+        artifact_contract_version_path,
+    ]
+    for model_name in MODEL_FAMILIES:
+        model_root = run_root / "models" / model_name
+        run_primary_artifacts.extend(
+            [
+                model_root / "forecast_ssvi_state.parquet",
+                model_root / "forecast_node_panel.parquet",
+                model_root / "forecast_contract_panel.parquet",
+            ]
+        )
+        for optional_name in ("selected_params.json", "model_artifact.json", "model_checkpoint.pt"):
+            optional_path = model_root / optional_name
+            if optional_path.exists():
+                run_primary_artifacts.append(optional_path)
     write_stage_bundle(
         run_root / "manifests",
         "run",
@@ -539,18 +600,7 @@ def run_experiment(config: AppConfig) -> Path:
             "state_var1": "cpu",
             "ssvi_tcn_direct": "cuda",
         },
-        primary_artifact_paths=[
-            run_root / "split_manifest.json",
-            run_root / "selected_model_configs.json",
-            run_root / "loss_panel.parquet",
-            run_root / "forecast_ssvi_certification.parquet",
-            run_root / "pricing_utility.parquet",
-            run_root / "hedged_pnl_utility.parquet",
-            run_root / "straddle_signal_utility.parquet",
-            run_root / "dm_tests.json",
-            run_root / "mcs_results.json",
-            summary_path,
-        ],
+        primary_artifact_paths=run_primary_artifacts,
         counts={
             "loss_rows": loss_panel.height,
             "certification_rows": certification_panel.height,
@@ -567,5 +617,6 @@ def run_experiment(config: AppConfig) -> Path:
             outputs["features_targets_path"],
         ],
     )
+    write_run_bundle_manifest(run_root, MODEL_FAMILIES)
     write_yaml(run_root / "resolved_config.yaml", config.model_config_dump())
     return run_root

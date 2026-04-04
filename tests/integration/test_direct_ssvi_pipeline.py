@@ -49,16 +49,23 @@ def test_build_data_stage_writes_direct_ssvi_artifacts(tmp_path: Path) -> None:
     assert (run_root / "trading_date_index.parquet").exists()
     assert (run_root / "feature_row_exclusions.parquet").exists()
     assert (run_root / "settlement_convention.json").exists()
+    assert (run_root / "stage_loss_by_date.parquet").exists()
+    assert (run_root / "stage_coverage_by_year.json").exists()
+    assert (run_root / "forward_invalid_reasons.json").exists()
+    assert (run_root / "benchmark_contract.json").exists()
     legacy_surface_name = "_".join(["sampled", "surface", "wide.parquet"])
     assert not (run_root / legacy_surface_name).exists()
     features = pl.read_parquet(run_root / "features_targets.parquet")
     trading_index = pl.read_parquet(run_root / "trading_date_index.parquet")
+    stage_loss = pl.read_parquet(run_root / "stage_loss_by_date.parquet")
     assert "option_root" in features.columns
     assert "history_start_index" in features.columns
     assert "history_end_index" in features.columns
     assert "surface_state_row_index" in features.columns
     assert "target_state_row_index" in features.columns
     assert "next_trading_date" in trading_index.columns
+    assert "first_failed_stage" in stage_loss.columns
+    assert "first_failure_reason_codes" in stage_loss.columns
     joined = features.join(
         trading_index.select(["quote_date", "next_trading_date"]),
         on="quote_date",

@@ -78,6 +78,33 @@ def _write_minimal_report_inputs(run_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    (run_dir / "benchmark_contract.json").write_text(
+        json.dumps(
+            {
+                "forecastable_window": {
+                    "ssvi_state_window": {
+                        "start_date": "2020-01-10",
+                        "end_date": "2020-01-31",
+                        "row_count": 15,
+                    },
+                    "feature_origin_window": {
+                        "start_date": "2020-01-13",
+                        "end_date": "2020-01-30",
+                        "row_count": 12,
+                    },
+                    "feature_target_window": {
+                        "start_date": "2020-01-14",
+                        "end_date": "2020-01-31",
+                        "row_count": 12,
+                    },
+                    "history_window_days": 22,
+                    "feature_candidate_days": 20,
+                    "feature_exclusion_count": 8,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "selected_model_configs.json").write_text(
         json.dumps(
             {
@@ -123,6 +150,8 @@ def test_write_summary_report_keeps_straddle_metrics_per_model(tmp_path) -> None
     summary_path = write_summary_report(run_dir)
 
     summary = summary_path.read_text(encoding="utf-8")
+    assert "## Forecastable Window" in summary
+    assert "- ssvi_state_window: `2020-01-10` to `2020-01-31` (15 dates)" in summary
     assert "## Straddle Utility" in summary
     assert "- `state_last` / `30d`: mean_net_return=0.000000, hit_rate=0.5000, sharpe=0.0000" in summary
     assert "- `state_var1` / `30d`: mean_net_return=0.200000, hit_rate=1.0000, sharpe=1.4142" in summary

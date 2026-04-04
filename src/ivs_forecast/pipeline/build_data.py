@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -13,9 +14,9 @@ from ivs_forecast.data.discovery import (
     audit_vendor_corpus,
     data_audit_markdown,
     inventory_raw_files,
-    require_exact_window_coverage,
     raw_corpus_contract,
     raw_inventory_frame,
+    require_exact_window_coverage,
     write_inventory_json,
 )
 from ivs_forecast.data.ingest import stream_ingest_selected_underlying
@@ -38,6 +39,14 @@ from ivs_forecast.features.dataset import (
 )
 from ivs_forecast.features.scalars import add_state_scalar_features
 from ivs_forecast.models.base import state_parameter_columns
+from ivs_forecast.reporting.data_quality import (
+    build_benchmark_contract,
+    build_forward_invalid_reasons_summary,
+    build_stage_coverage_by_year,
+    build_stage_loss_by_date,
+    initialize_daily_build_diagnostics,
+    summarize_forward_diagnostics,
+)
 
 
 def _subset_path_quote_date(path: Path) -> date:
@@ -159,11 +168,14 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
     )
     subset_paths = stream_ingest_selected_underlying(config, raw_records)
     trading_dates = [_subset_path_quote_date(path) for path in sorted(subset_paths)]
+    minimum_history_days = 22
+    daily_diagnostics = initialize_daily_build_diagnostics(trading_dates, config.study.option_root)
     clean_contracts_root = run_root / "clean_contracts"
     surface_nodes_root = run_root / "surface_nodes"
     clean_partition_records: list[DatePartitionRecord] = []
     surface_partition_records: list[DatePartitionRecord] = []
     forward_frames: list[pl.DataFrame] = []
+    all_forward_diagnostics = []
     date_quality_frames: list[pl.DataFrame] = []
     ssvi_state_rows: list[dict[str, object]] = []
     ssvi_fit_rows: list[dict[str, object]] = []
@@ -179,19 +191,35 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
         quote_date = (
             subset_frame["quote_date"][0] if subset_frame.height > 0 else _subset_path_quote_date(subset_path)
         )
+        day_diagnostics = daily_diagnostics[quote_date]
+        day_diagnostics.subset_rows = subset_frame.height
         cleaned_day, duplicate_summary = clean_contracts_day(subset_frame, config)
         exact_duplicates_removed += duplicate_summary.exact_duplicates_removed
+        day_diagnostics.clean_contract_rows = cleaned_day.height
         if cleaned_day.is_empty():
             continue
         clean_contract_rows += cleaned_day.height
         clean_partition_records.append(write_date_partition(clean_contracts_root, quote_date, cleaned_day))
         forward_day, forward_day_diagnostics = estimate_forward_terms(cleaned_day)
+        (
+            day_diagnostics.forward_total_expiries,
+            day_diagnostics.forward_valid_expiries,
+            day_diagnostics.forward_invalid_expiries,
+            day_diagnostics.forward_invalid_reason_codes,
+        ) = summarize_forward_diagnostics(forward_day_diagnostics)
+        day_diagnostics.forward_term_rows = forward_day.height
+        all_forward_diagnostics.extend(forward_day_diagnostics)
         forward_invalid_count += sum(item.invalid_reason is not None for item in forward_day_diagnostics)
         if forward_day.is_empty():
             continue
         forward_frames.append(forward_day)
         nodes_day, date_quality_day = build_surface_nodes(cleaned_day, forward_day, config)
         if not date_quality_day.is_empty():
+            quality_row = date_quality_day.row(0, named=True)
+            day_diagnostics.surface_node_count = int(quality_row["surface_node_count"])
+            day_diagnostics.valid_expiry_count = int(quality_row["valid_expiry_count"])
+            day_diagnostics.root_count = int(quality_row["root_count"])
+            day_diagnostics.modeling_valid = bool(quality_row["modeling_valid"])
             date_quality_frames.append(date_quality_day)
         if nodes_day.is_empty():
             continue
@@ -238,6 +266,7 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
                 **certification,
             }
         )
+        day_diagnostics.has_surface_state = True
     clean_contracts_index_path = run_root / "clean_contracts_index.parquet"
     surface_nodes_index_path = run_root / "surface_nodes_index.parquet"
     write_polars(clean_contracts_index_path, partition_index_frame(clean_partition_records))
@@ -288,12 +317,47 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
     )
     trading_date_index_path = run_root / "trading_date_index.parquet"
     write_polars(trading_date_index_path, trading_date_index)
-    feature_artifacts = build_features_targets(ssvi_state, trading_date_index)
+    feature_artifacts = build_features_targets(
+        ssvi_state,
+        trading_date_index,
+        minimum_history_days=minimum_history_days,
+    )
     feature_row_exclusions_path = run_root / "feature_row_exclusions.parquet"
     write_polars(feature_row_exclusions_path, feature_artifacts.exclusions)
     features_targets = feature_artifacts.features_targets
     features_targets_path = run_root / "features_targets.parquet"
     write_polars(features_targets_path, features_targets)
+    stage_loss_by_date = build_stage_loss_by_date(
+        trading_date_index=trading_date_index,
+        daily_diagnostics=daily_diagnostics,
+        features_targets=features_targets,
+        feature_exclusions=feature_artifacts.exclusions,
+        min_surface_nodes=config.study.min_surface_nodes,
+        min_valid_expiries=config.study.min_valid_expiries,
+    )
+    stage_loss_by_date_path = run_root / "stage_loss_by_date.parquet"
+    write_polars(stage_loss_by_date_path, stage_loss_by_date)
+    stage_coverage_by_year = build_stage_coverage_by_year(stage_loss_by_date)
+    stage_coverage_by_year_path = run_root / "stage_coverage_by_year.json"
+    write_json(stage_coverage_by_year_path, stage_coverage_by_year)
+    forward_invalid_reasons_path = run_root / "forward_invalid_reasons.json"
+    write_json(
+        forward_invalid_reasons_path,
+        build_forward_invalid_reasons_summary(all_forward_diagnostics),
+    )
+    benchmark_contract_path = run_root / "benchmark_contract.json"
+    raw_corpus_contract = json.loads(
+        verify_outputs["raw_corpus_contract_path"].read_text(encoding="utf-8")
+    )
+    benchmark_contract = build_benchmark_contract(
+        raw_corpus_contract=raw_corpus_contract,
+        trading_date_index=trading_date_index,
+        ssvi_state=ssvi_state,
+        features_targets=features_targets,
+        feature_exclusions=feature_artifacts.exclusions,
+        minimum_history_days=minimum_history_days,
+    )
+    write_json(benchmark_contract_path, benchmark_contract)
     exclusion_counts = (
         {
             str(row["exclusion_reason"]): int(row["count"])
@@ -321,6 +385,10 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
             feature_row_exclusions_path,
             settlement_convention_path,
             features_targets_path,
+            stage_loss_by_date_path,
+            stage_coverage_by_year_path,
+            forward_invalid_reasons_path,
+            benchmark_contract_path,
         ],
         counts={
             "inventory_rows": inventory.height,
@@ -331,6 +399,7 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
             "trading_dates": trading_date_index.height,
             "feature_rows": features_targets.height,
             "feature_row_exclusions": feature_artifacts.exclusions.height,
+            "stage_loss_rows": stage_loss_by_date.height,
         },
         diagnostics={
             "clean_contracts_rows": clean_contract_rows,
@@ -339,6 +408,9 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
             "forward_invalid_count": forward_invalid_count,
             "exact_duplicates_removed": exact_duplicates_removed,
             "feature_row_exclusion_counts": exclusion_counts,
+            "first_ssvi_state_date": benchmark_contract["forecastable_window"]["ssvi_state_window"]["start_date"],
+            "first_feature_origin_date": benchmark_contract["forecastable_window"]["feature_origin_window"]["start_date"],
+            "first_feature_target_date": benchmark_contract["forecastable_window"]["feature_target_window"]["start_date"],
         },
         upstream_paths=[
             verify_outputs["inventory_path"],
@@ -362,4 +434,8 @@ def build_data_stage(config: AppConfig) -> dict[str, Path]:
         "feature_row_exclusions_path": feature_row_exclusions_path,
         "settlement_convention_path": settlement_convention_path,
         "features_targets_path": features_targets_path,
+        "stage_loss_by_date_path": stage_loss_by_date_path,
+        "stage_coverage_by_year_path": stage_coverage_by_year_path,
+        "forward_invalid_reasons_path": forward_invalid_reasons_path,
+        "benchmark_contract_path": benchmark_contract_path,
     }

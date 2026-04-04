@@ -5,6 +5,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from ivs_forecast.artifacts.bundles import export_run_bundle
 from ivs_forecast.config import load_config
 from ivs_forecast.logging_utils import configure_logging
 
@@ -62,3 +63,18 @@ def report(run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay
 
     summary_path = write_summary_report(run_dir)
     console.print(f"Wrote summary report to {summary_path}")
+
+
+@app.command("export-bundle")
+def export_bundle(
+    run_dir: Path = typer.Option(..., "--run-dir", exists=True, file_okay=False),
+    output: Path = typer.Option(..., "--output"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing bundle zip."),
+) -> None:
+    bundle_path = export_run_bundle(
+        run_root=run_dir,
+        destination=output,
+        model_families=["state_last", "state_var1", "ssvi_tcn_direct"],
+        overwrite=overwrite,
+    )
+    console.print(f"Wrote bundle to {bundle_path}")

@@ -30,6 +30,10 @@ Required outputs:
 - `feature_row_exclusions.parquet`
 - `settlement_convention.json`
 - `features_targets.parquet`
+- `stage_loss_by_date.parquet`
+- `stage_coverage_by_year.json`
+- `forward_invalid_reasons.json`
+- `benchmark_contract.json`
 
 Schema notes:
 
@@ -42,6 +46,10 @@ Schema notes:
 - `trading_date_index.parquet` stores the raw/root trading calendar, the immediate next trading date, and whether a valid SSVI state exists for each date
 - `feature_row_exclusions.parquet` records rows dropped for `missing_origin_state`, `missing_target_state`, or `missing_history_window`
 - `settlement_convention.json` records the explicit settlement proxy used for ACT/365 timing
+- `stage_loss_by_date.parquet` records the first failed stage and machine-readable reason codes for every raw/root trading date
+- `stage_coverage_by_year.json` aggregates stage survival and first-failure counts by calendar year
+- `forward_invalid_reasons.json` summarizes parity-forward invalid expiries by reason and by year
+- `benchmark_contract.json` records the raw-window contract plus the actual forecastable state and feature windows
 
 ## Run stage
 
@@ -59,12 +67,16 @@ Required outputs:
 - `dm_tests.json`
 - `mcs_results.json`
 - `summary.md`
+- `artifact_contract_version.json`
+- `bundle_manifest.json`
 
 The `models/<model_name>/` directory may also contain:
 
 - `selected_params.json`
 - `model_artifact.json`
 - `model_checkpoint.pt` for `ssvi_tcn_direct`
+
+`bundle_manifest.json` enumerates the validated evidence-bundle file set with SHA256 hashes so external review bundles can be exported without silently omitting required artifacts.
 
 ## Removed artifacts
 

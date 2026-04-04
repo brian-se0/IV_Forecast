@@ -84,6 +84,10 @@ def test_cli_build_data_on_synthetic_dataset(tmp_path: Path) -> None:
         "feature_row_exclusions.parquet",
         "settlement_convention.json",
         "features_targets.parquet",
+        "stage_loss_by_date.parquet",
+        "stage_coverage_by_year.json",
+        "forward_invalid_reasons.json",
+        "benchmark_contract.json",
     ):
         assert (run_dir / name).exists(), name
     legacy_surface_name = "_".join(["sampled", "surface", "wide.parquet"])
@@ -141,6 +145,10 @@ def test_cli_run_and_report_on_synthetic_dataset(tmp_path: Path) -> None:
         "feature_row_exclusions.parquet",
         "settlement_convention.json",
         "features_targets.parquet",
+        "stage_loss_by_date.parquet",
+        "stage_coverage_by_year.json",
+        "forward_invalid_reasons.json",
+        "benchmark_contract.json",
         "split_manifest.json",
         "loss_panel.parquet",
         "forecast_ssvi_certification.parquet",
@@ -150,6 +158,8 @@ def test_cli_run_and_report_on_synthetic_dataset(tmp_path: Path) -> None:
         "dm_tests.json",
         "mcs_results.json",
         "summary.md",
+        "artifact_contract_version.json",
+        "bundle_manifest.json",
     ]
     for name in mandatory:
         assert (run_dir / name).exists(), name

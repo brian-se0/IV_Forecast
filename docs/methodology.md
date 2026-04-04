@@ -11,6 +11,7 @@ This repository implements one ordered workflow:
 - collapse root-explicit surface nodes
 - calibrate one daily SSVI state
 - build a trading-date continuity index and drop origin rows that would otherwise skip over a missing target day
+- write per-date stage-loss forensics and by-year coverage summaries so forecastable-window truncation is explicit
 - forecast the next day’s latent SSVI state
 - decode forecasts directly onto realized next-day nodes and contracts
 

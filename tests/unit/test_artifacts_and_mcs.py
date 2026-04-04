@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import json
+import zipfile
+
 import numpy as np
 import pytest
 
+from ivs_forecast.artifacts.bundles import (
+    export_run_bundle,
+    resolve_run_bundle_contract,
+    write_artifact_contract_version,
+    write_run_bundle_manifest,
+)
 from ivs_forecast.artifacts.hashing import sha256_file
 from ivs_forecast.artifacts.manifests import build_stage_manifest
 from ivs_forecast.evaluation.mcs import run_mcs
@@ -25,6 +34,110 @@ def test_build_stage_manifest_records_primary_artifacts(tmp_path) -> None:
     assert manifest.package_versions["numpy"]
     assert manifest.global_seed == 123
     assert manifest.primary_artifacts[0].sha256 == sha256_file(artifact_path)
+
+
+def _write_contract_run_tree(run_root) -> None:
+    top_level_files = [
+        "raw_inventory.parquet",
+        "raw_inventory.json",
+        "raw_corpus_contract.json",
+        "vendor_schema_reconciliation.json",
+        "data_audit_report.md",
+        "clean_contracts_index.parquet",
+        "forward_terms.parquet",
+        "surface_nodes_index.parquet",
+        "surface_date_quality.parquet",
+        "ssvi_state.parquet",
+        "ssvi_fit_diagnostics.parquet",
+        "ssvi_certification.parquet",
+        "trading_date_index.parquet",
+        "feature_row_exclusions.parquet",
+        "settlement_convention.json",
+        "features_targets.parquet",
+        "stage_loss_by_date.parquet",
+        "stage_coverage_by_year.json",
+        "forward_invalid_reasons.json",
+        "benchmark_contract.json",
+        "split_manifest.json",
+        "selected_model_configs.json",
+        "loss_panel.parquet",
+        "forecast_ssvi_certification.parquet",
+        "pricing_utility.parquet",
+        "hedged_pnl_utility.parquet",
+        "straddle_signal_utility.parquet",
+        "dm_tests.json",
+        "mcs_results.json",
+        "summary.md",
+        "manifests/verify_data_manifest.json",
+        "manifests/verify_data_resolved_config.yaml",
+        "manifests/build_data_manifest.json",
+        "manifests/build_data_resolved_config.yaml",
+        "manifests/run_manifest.json",
+        "manifests/run_resolved_config.yaml",
+    ]
+    for relative_path in top_level_files:
+        path = run_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(relative_path, encoding="utf-8")
+    for model_name in ("state_last", "state_var1", "ssvi_tcn_direct"):
+        model_root = run_root / "models" / model_name
+        model_root.mkdir(parents=True, exist_ok=True)
+        for relative_name in (
+            "forecast_ssvi_state.parquet",
+            "forecast_node_panel.parquet",
+            "forecast_contract_panel.parquet",
+            "selected_params.json",
+            "model_artifact.json",
+        ):
+            (model_root / relative_name).write_text(relative_name, encoding="utf-8")
+    (run_root / "models" / "ssvi_tcn_direct" / "model_checkpoint.pt").write_text(
+        "checkpoint", encoding="utf-8"
+    )
+    write_artifact_contract_version(run_root)
+
+
+def test_write_run_bundle_manifest_requires_full_run_contract(tmp_path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_contract_run_tree(run_root)
+
+    manifest_path = write_run_bundle_manifest(
+        run_root, ["state_last", "state_var1", "ssvi_tcn_direct"]
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    required_paths = {item["relative_path"] for item in manifest["required_artifacts"]}
+    optional_paths = {item["relative_path"] for item in manifest["optional_artifacts"]}
+    assert "models/state_last/forecast_node_panel.parquet" in required_paths
+    assert "models/ssvi_tcn_direct/model_checkpoint.pt" in optional_paths
+
+
+def test_resolve_run_bundle_contract_fails_when_required_artifact_is_missing(tmp_path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_contract_run_tree(run_root)
+    (run_root / "models" / "state_var1" / "forecast_contract_panel.parquet").unlink()
+
+    with pytest.raises(FileNotFoundError, match="forecast_contract_panel.parquet"):
+        resolve_run_bundle_contract(run_root, ["state_last", "state_var1", "ssvi_tcn_direct"])
+
+
+def test_export_run_bundle_writes_zip_from_validated_manifest(tmp_path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    _write_contract_run_tree(run_root)
+
+    bundle_path = export_run_bundle(
+        run_root=run_root,
+        destination=tmp_path / "bundle.zip",
+        model_families=["state_last", "state_var1", "ssvi_tcn_direct"],
+    )
+
+    with zipfile.ZipFile(bundle_path) as handle:
+        names = set(handle.namelist())
+    assert "bundle_manifest.json" in names
+    assert "models/ssvi_tcn_direct/forecast_ssvi_state.parquet" in names
+    assert "artifact_contract_version.json" in names
 
 
 def test_run_mcs_excludes_dominated_model_and_is_reproducible() -> None:

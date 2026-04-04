@@ -43,6 +43,7 @@ The end-to-end workflow is:
 10. Build a narrow feature index with 22-day chronology-safe history windows, same-day scalar regime/liquidity features, a checked trading-date index, and explicit row exclusions when the immediate next trading day lacks a valid target state.
 11. Train and compare exactly three models: `state_last`, `state_var1`, and `ssvi_tcn_direct`.
 12. Decode forecasts directly onto realized next-day nodes and contracts for loss, pricing, hedging, straddle, DM, and MCS outputs.
+13. Write date-level stage-loss forensics, by-year coverage summaries, and a validated bundle manifest for external audit.
 
 ## Model set
 
@@ -141,6 +142,12 @@ Regenerate the summary report for an existing run:
 uv run ivs-forecast report --run-dir artifacts/runs/<run_id>
 ```
 
+Export a validated evidence bundle for external review:
+
+```bash
+uv run ivs-forecast export-bundle --run-dir artifacts/runs/<run_id> --output artifacts/upload_bundles/<run_id>.zip
+```
+
 The generated `summary.md` reports straddle utility separately for each model and anchor horizon.
 The canonical benchmark requires the requested study window to match the observed raw ZIP window exactly.
 
@@ -166,6 +173,10 @@ Build stage:
 - `feature_row_exclusions.parquet`
 - `settlement_convention.json`
 - `features_targets.parquet`
+- `stage_loss_by_date.parquet`
+- `stage_coverage_by_year.json`
+- `forward_invalid_reasons.json`
+- `benchmark_contract.json`
 
 Run stage:
 
@@ -181,6 +192,8 @@ Run stage:
 - `dm_tests.json`
 - `mcs_results.json`
 - `summary.md`
+- `artifact_contract_version.json`
+- `bundle_manifest.json`
 
 Every stage also writes a manifest and resolved-config snapshot under `manifests/`.
 
